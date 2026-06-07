@@ -18,7 +18,7 @@ type MachineCategory =
   | "Mechanical Double 280" | "Mechanical Double 140"
 type Priority   = "High" | "Normal" | "Low"
 type WarpStatus = "not-started" | "on-machine" | "done"
-type View       = "dashboard" | "orders" | "machines" | "textiles" | "analytics"
+type View       = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history"
 
 type Machine = {
   id: number; name: string; category: MachineCategory; capacity: number
@@ -97,26 +97,23 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
   const map: Record<number, Order[]> = {}
   machines.forEach(m => { map[m.id] = [] })
 
-  // active machines only — out-of-order machines still get a slot in map
-  // so their on-machine orders show up there, but no new orders go to them
   const activeMachines = machines.filter(m => !m.outOfOrder)
-
   const locked = new Set<number>()
 
-  // ── STEP 1: forced assignments always go exactly where the user said
+  // ── STEP 1: forced assignments (not-started or on-machine, never done)
   for (const o of orders) {
+    if (o.warpStatus === "done") continue   // done = history only, not in schedule
     if (o.forcedMachineId !== undefined && map[o.forcedMachineId] !== undefined) {
       map[o.forcedMachineId].push(o)
       locked.add(o.id)
     }
   }
 
-  // ── STEP 2: lock on-machine and done orders (that aren't already placed)
+  // ── STEP 2: lock ONLY on-machine orders (done orders are excluded entirely)
   for (const o of orders) {
     if (locked.has(o.id)) continue
-    if (o.warpStatus === "on-machine" || o.warpStatus === "done") {
-      // if the machine it's on is now out-of-order, keep it there visually
-      // (can't move an in-progress warp mid-run) — it shows a warning
+    if (o.warpStatus === "done") continue   // skip — goes to history, not schedule
+    if (o.warpStatus === "on-machine") {
       const compat = machines.filter(m => o.machineCategories.includes(m.category))
       if (!compat.length) continue
       const wk = warpKey(o)
@@ -126,10 +123,9 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
     }
   }
 
-  // ── STEP 3: re-optimize all not-started orders (excluding forced+locked)
-  // out-of-order machines are excluded from receiving new orders
+  // ── STEP 3: re-optimize all not-started orders
   const pending = orders
-    .filter(o => !locked.has(o.id))
+    .filter(o => !locked.has(o.id) && o.warpStatus !== "done")
     .sort((a, b) => {
       const flexDiff = a.machineCategories.length - b.machineCategories.length
       if (flexDiff !== 0) return flexDiff
@@ -149,7 +145,6 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
   }
 
   for (const o of pending) {
-    // only consider active (non-out-of-order) compatible machines
     const compat = activeMachines.filter(m => o.machineCategories.includes(m.category))
     if (!compat.length) continue
     const best = compat.reduce((b, m) => score(m, o) > score(b, o) ? m : b)
@@ -528,6 +523,7 @@ export default function App() {
   const [oNotes,   setONotes]   = useState("")
 
   const [forceSwitchOrder, setForceSwitchOrder] = useState<Order|null>(null)
+  const [historySearch, setHistorySearch] = useState("")
 
   // ── SUPABASE: initial load + real-time sync ───────────────
   // We keep a flag to avoid re-subscribing on every render
@@ -571,9 +567,11 @@ export default function App() {
   }, [orders, machines, ready])
 
   const filteredOrders = useMemo(() => {
-    if (!search) return orders
+    // done orders go to History — active orders view shows only not-started and on-machine
+    const active = orders.filter(o => o.warpStatus !== "done")
+    if (!search) return active
     const q = search.toLowerCase()
-    return orders.filter(o =>
+    return active.filter(o =>
       o.textile.toLowerCase().includes(q) ||
       o.color.toLowerCase().includes(q) ||
       o.fabricType.toLowerCase().includes(q)
@@ -588,7 +586,9 @@ export default function App() {
       label: string; machine: string; machineId: number|null
       meters: number; count: number; orderIds: number[]
     }> = {}
-    for (const o of orders) {
+    // only active (non-done) orders appear in warp groups
+    const activeOrders = orders.filter(o => o.warpStatus !== "done")
+    for (const o of activeOrders) {
       const assignedM = machines.find(m => (schedule[m.id] ?? []).some(x => x.id === o.id))
       if (!assignedM) continue
       const key = machineWarpKey(o, assignedM.id)
@@ -601,7 +601,7 @@ export default function App() {
       g[key].count++
       g[key].orderIds.push(o.id)
     }
-    for (const o of orders) {
+    for (const o of activeOrders) {
       const inSchedule = machines.some(m => (schedule[m.id] ?? []).some(x => x.id === o.id))
       if (!inSchedule) {
         const key = `${warpKey(o)}||unassigned`
@@ -746,23 +746,41 @@ export default function App() {
     dbUpsert("machines", updated as unknown as Record<string, unknown>)
   }
 
-  // ── FEATURE 2a: "Warp done, start next" — marks the current on-machine
-  // order(s) in this group as done, resets not-started ones so they re-queue
+  // ── FEATURE 2a: "Warp done, start next"
+  // The physical warp on the machine is finished.
+  // Every order in this group that is "on-machine" or "not-started" gets
+  // marked done (the warp is gone). Then for every order that was
+  // "not-started" (i.e. hasn't actually been woven yet), we create a
+  // fresh copy with not-started status so it gets re-queued on the next warp.
   function warpNextRun(orderIds: number[]) {
-    setOrders(p => p.map(o => {
+    const groupOrders = orders.filter(o => orderIds.includes(o.id))
+    const needsRequeue = groupOrders.filter(o => o.warpStatus === "not-started")
+
+    // mark all as done first
+    const updatedOrders = orders.map(o => {
       if (!orderIds.includes(o.id)) return o
-      // on-machine → done (this warp is physically finished)
-      // not-started → stays not-started but forcedMachineId is cleared
-      // so re-optimizer can group the next batch optimally
-      const updated = o.warpStatus === "on-machine"
-        ? { ...o, warpStatus: "done" as WarpStatus }
-        : { ...o, forcedMachineId: undefined }
+      const updated = { ...o, warpStatus: "done" as WarpStatus }
       dbUpsert("orders", updated as unknown as Record<string, unknown>)
       return updated
-    }))
+    })
+
+    // create fresh copies for orders that weren't actually run yet
+    const newOrders: Order[] = needsRequeue.map(o => {
+      const fresh: Order = {
+        ...o,
+        id: Date.now() + Math.random(),   // new unique id
+        warpStatus: "not-started",
+        forcedMachineId: undefined,        // let optimizer re-group optimally
+      }
+      dbUpsert("orders", fresh as unknown as Record<string, unknown>)
+      return fresh
+    })
+
+    setOrders([...updatedOrders, ...newOrders])
   }
 
   // ── FEATURE 2b: "All orders done" — marks every order in the group as done
+  // No requeue — these orders are fully completed.
   function warpGroupDone(orderIds: number[]) {
     setOrders(p => p.map(o => {
       if (!orderIds.includes(o.id)) return o
@@ -850,6 +868,7 @@ export default function App() {
     {id:"machines",  icon:"⚙", label:"Machines"},
     {id:"textiles",  icon:"🧵", label:"Textiles"},
     {id:"analytics", icon:"↗", label:"Analytics"},
+    {id:"history",   icon:"🕓", label:"History"},
   ]
 
   return (
@@ -1065,8 +1084,8 @@ export default function App() {
           <div style={S.viewPad}>
             <div style={S.card}>
               <div style={S.cHead}>
-                <span style={S.cTitle}>All orders</span>
-                <span style={S.cSub}>{filteredOrders.length} shown</span>
+                <span style={S.cTitle}>Active orders</span>
+                <span style={S.cSub}>{filteredOrders.length} shown · done orders in History</span>
               </div>
               <div style={S.cBody}>
                 {filteredOrders.length===0&&<div style={S.empty}>No orders match your search.</div>}
@@ -1257,6 +1276,99 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* ── HISTORY VIEW ──────────────────────────────── */}
+        {view==="history" && (()=>{
+          const doneOrders = orders.filter(o => o.warpStatus === "done")
+          const filtered = historySearch.trim()
+            ? doneOrders.filter(o =>
+                o.textile.toLowerCase().includes(historySearch.toLowerCase()) ||
+                o.color.toLowerCase().includes(historySearch.toLowerCase()) ||
+                o.fabricType.toLowerCase().includes(historySearch.toLowerCase())
+              )
+            : doneOrders
+          const totalDoneMeters = doneOrders.reduce((s,o)=>s+o.quantity,0)
+          return (
+            <div style={S.viewPad}>
+              {/* summary strip */}
+              <div style={{display:"flex",gap:12,marginBottom:16}}>
+                <div style={S.mCard}>
+                  <div style={S.mLabel}>Completed orders</div>
+                  <div style={S.mVal}>{doneOrders.length}</div>
+                </div>
+                <div style={S.mCard}>
+                  <div style={S.mLabel}>Total meters produced</div>
+                  <div style={S.mVal}>{totalDoneMeters.toLocaleString()}m</div>
+                </div>
+              </div>
+
+              <div style={S.card}>
+                <div style={S.cHead}>
+                  <span style={S.cTitle}>Completed orders</span>
+                  <span style={S.cSub}>{filtered.length} shown</span>
+                  {/* search inside history */}
+                  <div style={{position:"relative",display:"flex",alignItems:"center",marginLeft:"auto"}}>
+                    <span style={{position:"absolute",left:9,fontSize:12,pointerEvents:"none"}}>🔍</span>
+                    <input style={{...S.search,width:160,marginBottom:0,paddingLeft:28}}
+                      placeholder="Search history…"
+                      value={historySearch}
+                      onChange={e=>setHistorySearch(e.target.value)}/>
+                  </div>
+                </div>
+                <div style={S.cBody}>
+                  {filtered.length===0 && (
+                    <div style={{...S.empty,textAlign:"center",padding:"32px 0"}}>
+                      <div style={{fontSize:28,marginBottom:8}}>🕓</div>
+                      <div style={{fontWeight:500,marginBottom:4}}>No completed orders yet</div>
+                      <div style={{fontSize:12,color:"#bbb"}}>
+                        Orders marked as done will appear here.
+                      </div>
+                    </div>
+                  )}
+                  {filtered.map(o=>{
+                    const warn = dlWarn(o.deadline)
+                    return (
+                      <div key={o.id} style={{...S.oRow,opacity:0.8}}>
+                        {/* green done pip */}
+                        <div style={{width:6,height:6,borderRadius:"50%",
+                          background:"#639922",marginTop:5,flexShrink:0}}/>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:14,fontWeight:500,
+                            textDecoration:"line-through",color:"#666"}}>{o.textile}</div>
+                          <div style={{fontSize:12,color:"#aaa",marginTop:2}}>
+                            {o.fabricType} · {o.color} · {(o.machineCategories??[]).join(", ")}
+                          </div>
+                          {o.deadline&&(
+                            <div style={{fontSize:11,marginTop:3,
+                              color:warn==="urgent"?"#E24B4A":warn==="soon"?"#BA7517":"#aaa"}}>
+                              {warn==="urgent"?"⚠️ Late — ":""}Due {o.deadline}
+                            </div>
+                          )}
+                          {o.notes&&<div style={{fontSize:11,color:"#bbb",marginTop:2,fontStyle:"italic"}}>{o.notes}</div>}
+                        </div>
+                        <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
+                          <Badge text="Done" color="#639922"/>
+                          <span style={{fontSize:13,color:"#aaa"}}>{o.quantity}m</span>
+                          <Badge text={o.priority} color={priColor(o.priority)}/>
+                          {/* restore button — move back to active if marked done by mistake */}
+                          <button
+                            onClick={()=>{
+                              const restored = {...o, warpStatus:"not-started" as WarpStatus}
+                              setOrders(p=>p.map(x=>x.id===o.id?restored:x))
+                              dbUpsert("orders", restored as unknown as Record<string,unknown>)
+                            }}
+                            style={{...S.btnSm,fontSize:10,padding:"2px 8px",marginTop:2,color:"#888"}}>
+                            ↩ Restore
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          )
+        })()}
 
         {/* ── TEXTILES VIEW ─────────────────────────────── */}
         {view==="textiles" && (
