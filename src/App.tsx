@@ -30,6 +30,7 @@ type Order   = {
   machineCategories: MachineCategory[]
   warpStatus: WarpStatus; notes: string
   forcedMachineId?: number   // set by user via force-switch — overrides optimizer
+  warpClosed?: boolean       // true = warp is sealed, new same-fabric orders start a new warp group
 }
 // A saved textile definition — the "database" entry
 type Textile = {
@@ -138,7 +139,9 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
     const q   = map[m.id]
     const ld  = q.reduce((s, x) => s + x.quantity, 0)
     const wk  = warpKey(o)
-    const sameWarp = q.some(x => warpKey(x) === wk)
+    // only score same-warp bonus if the matching orders are NOT closed
+    // closed = warp is sealed, new orders must start a fresh group
+    const sameWarp = q.some(x => warpKey(x) === wk && !x.warpClosed)
     const cap = m.capacity ?? DEFAULT_CAP
     const overload = ld > cap ? (ld - cap) * 2 : 0
     return (sameWarp ? 10000 : 0) - ld - overload
@@ -585,17 +588,18 @@ export default function App() {
     const g: Record<string, {
       label: string; machine: string; machineId: number|null
       meters: number; count: number; orderIds: number[]
+      closed: boolean   // true = warp is sealed / on-machine
     }> = {}
-    // only active (non-done) orders appear in warp groups
     const activeOrders = orders.filter(o => o.warpStatus !== "done")
     for (const o of activeOrders) {
       const assignedM = machines.find(m => (schedule[m.id] ?? []).some(x => x.id === o.id))
       if (!assignedM) continue
-      const key = machineWarpKey(o, assignedM.id)
+      const key = machineWarpKey(o, assignedM.id) + (o.warpClosed ? "||closed" : "||open")
       if (!g[key]) g[key] = {
         label: `${o.fabricType} · ${o.color}`,
         machine: assignedM.name, machineId: assignedM.id,
         meters: 0, count: 0, orderIds: [],
+        closed: !!o.warpClosed,
       }
       g[key].meters += calcWarp(o.quantity)
       g[key].count++
@@ -607,7 +611,7 @@ export default function App() {
         const key = `${warpKey(o)}||unassigned`
         if (!g[key]) g[key] = {
           label: `${o.fabricType} · ${o.color}`, machine: "Unassigned", machineId: null,
-          meters: 0, count: 0, orderIds: [],
+          meters: 0, count: 0, orderIds: [], closed: false,
         }
         g[key].meters += calcWarp(o.quantity)
         g[key].count++
@@ -746,45 +750,27 @@ export default function App() {
     dbUpsert("machines", updated as unknown as Record<string, unknown>)
   }
 
-  // ── FEATURE 2a: "Warp done, start next"
-  // The physical warp on the machine is finished.
-  // Every order in this group that is "on-machine" or "not-started" gets
-  // marked done (the warp is gone). Then for every order that was
-  // "not-started" (i.e. hasn't actually been woven yet), we create a
-  // fresh copy with not-started status so it gets re-queued on the next warp.
+  // ── "Warp done, start next"
+  // The physical warp thread is now on the machine and running.
+  // All orders in this group → status becomes "on-machine", warpClosed = true.
+  // They stay on the dashboard. The warp group is sealed — new orders with
+  // the same fabric+color will start a completely separate new warp group.
   function warpNextRun(orderIds: number[]) {
-    const groupOrders = orders.filter(o => orderIds.includes(o.id))
-    const needsRequeue = groupOrders.filter(o => o.warpStatus === "not-started")
-
-    // mark all as done first
-    const updatedOrders = orders.map(o => {
+    setOrders(p => p.map(o => {
       if (!orderIds.includes(o.id)) return o
-      const updated = { ...o, warpStatus: "done" as WarpStatus }
+      const updated: Order = { ...o, warpStatus: "on-machine", warpClosed: true }
       dbUpsert("orders", updated as unknown as Record<string, unknown>)
       return updated
-    })
-
-    // create fresh copies for orders that weren't actually run yet
-    const newOrders: Order[] = needsRequeue.map(o => {
-      const fresh: Order = {
-        ...o,
-        id: Date.now() + Math.random(),   // new unique id
-        warpStatus: "not-started",
-        forcedMachineId: undefined,        // let optimizer re-group optimally
-      }
-      dbUpsert("orders", fresh as unknown as Record<string, unknown>)
-      return fresh
-    })
-
-    setOrders([...updatedOrders, ...newOrders])
+    }))
   }
 
-  // ── FEATURE 2b: "All orders done" — marks every order in the group as done
-  // No requeue — these orders are fully completed.
+  // ── "All orders done"
+  // All orders in this warp group are fully woven and delivered.
+  // They move to history (warpStatus = "done") and disappear from the dashboard.
   function warpGroupDone(orderIds: number[]) {
     setOrders(p => p.map(o => {
       if (!orderIds.includes(o.id)) return o
-      const updated = { ...o, warpStatus: "done" as WarpStatus }
+      const updated: Order = { ...o, warpStatus: "done", warpClosed: true }
       dbUpsert("orders", updated as unknown as Record<string, unknown>)
       return updated
     }))
@@ -984,10 +970,15 @@ export default function App() {
                           ? <div style={{fontSize:12,color:"#bbb",paddingTop:4}}>No orders assigned</div>
                           : <>
                             {active&&(
-                              <div style={S.activeWarp}>
+                              <div style={{...S.activeWarp,
+                                borderColor: active.warpClosed ? "#639922" : "#7F77DD",
+                                background: active.warpClosed ? "#EDFBEE" : "transparent"}}>
                                 <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
                                   <div style={{flex:1}}>
-                                    <div style={S.activeLabel}>Active warp</div>
+                                    <div style={{...S.activeLabel,
+                                      color: active.warpClosed ? "#166534" : "#7F77DD"}}>
+                                      {active.warpClosed ? "🔒 Running on machine" : "Active warp"}
+                                    </div>
                                     <div style={{fontSize:13,fontWeight:500}}>{active.textile}</div>
                                     <div style={{fontSize:11,color:"#888"}}>{active.fabricType} · {active.color} · {active.quantity}m</div>
                                     {active.forcedMachineId&&(
@@ -1000,12 +991,14 @@ export default function App() {
                                       </div>
                                     )}
                                   </div>
-                                  <button
-                                    onClick={()=>setForceSwitchOrder(active)}
-                                    style={{...S.btnSm,fontSize:10,padding:"3px 8px",color:"#7F77DD",
-                                      border:"0.5px solid #7F77DD",background:"#F3F2FD",flexShrink:0}}>
-                                    ⚡ Switch machine
-                                  </button>
+                                  {!active.warpClosed && (
+                                    <button
+                                      onClick={()=>setForceSwitchOrder(active)}
+                                      style={{...S.btnSm,fontSize:10,padding:"3px 8px",color:"#7F77DD",
+                                        border:"0.5px solid #7F77DD",background:"#F3F2FD",flexShrink:0}}>
+                                      ⚡ Switch machine
+                                    </button>
+                                  )}
                                 </div>
                               </div>
                             )}
@@ -1040,34 +1033,45 @@ export default function App() {
                 <div style={S.cHead}><span style={S.cTitle}>Warp groups</span><span style={S.cSub}>per machine · fabric + color</span></div>
                 <div style={S.cBody}>
                   {Object.keys(warpGroups).length===0&&<div style={S.empty}>No orders yet.</div>}
-                  {Object.entries(warpGroups).map(([key,{label,machine,meters,count,orderIds}])=>(
-                    <div key={key} style={{padding:"10px 0",borderBottom:"0.5px solid #f5f5f5"}}>
+                  {Object.entries(warpGroups).map(([key,{label,machine,meters,count,orderIds,closed}])=>(
+                    <div key={key} style={{padding:"10px 0",borderBottom:"0.5px solid #f5f5f5",
+                      opacity: closed ? 0.85 : 1}}>
                       <div style={{display:"flex",alignItems:"center"}}>
                         <div style={{flex:1}}>
-                          <div style={{fontSize:13,fontWeight:500}}>{label}</div>
+                          <div style={{display:"flex",alignItems:"center",gap:8}}>
+                            <span style={{fontSize:13,fontWeight:500}}>{label}</span>
+                            {closed && (
+                              <span style={{background:"#EDFBEE",color:"#166534",borderRadius:4,
+                                padding:"1px 7px",fontSize:10,fontWeight:600}}>
+                                🔒 Warp running
+                              </span>
+                            )}
+                          </div>
                           <div style={{fontSize:11,color:"#888",display:"flex",alignItems:"center",gap:6,marginTop:2}}>
                             <span>→ {machine}</span>
                             <span>·</span>
                             <span>{count} order{count>1?"s":""}</span>
-                            {count>1&&<span style={S.sameWarp}>same warp</span>}
+                            {count>1&&!closed&&<span style={S.sameWarp}>same warp</span>}
                           </div>
                         </div>
                         <div style={{fontSize:13,color:"#555",marginRight:10}}>{meters}m</div>
                       </div>
                       {/* action buttons */}
-                      <div style={{display:"flex",gap:6,marginTop:8}}>
-                        <button
-                          onClick={()=>warpNextRun(orderIds)}
-                          style={{...S.btnSm,fontSize:11,padding:"4px 10px",
-                            background:"#FEF9EE",color:"#92400E",border:"0.5px solid #FCD34D"}}
-                          title="Mark current on-machine orders as done, release next batch">
-                          🔄 Warp done, start next
-                        </button>
+                      <div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}>
+                        {!closed && (
+                          <button
+                            onClick={()=>warpNextRun(orderIds)}
+                            style={{...S.btnSm,fontSize:11,padding:"4px 10px",
+                              background:"#FEF9EE",color:"#92400E",border:"0.5px solid #FCD34D"}}
+                            title="Seal this warp — orders move to on-machine. New same-color orders start a fresh warp.">
+                            🔒 Warp done, start next
+                          </button>
+                        )}
                         <button
                           onClick={()=>warpGroupDone(orderIds)}
                           style={{...S.btnSm,fontSize:11,padding:"4px 10px",
                             background:"#EDFBEE",color:"#166534",border:"0.5px solid #86EFAC"}}
-                          title="Mark ALL orders in this warp group as done">
+                          title="All orders in this warp are fully woven — move to history">
                           ✅ All orders done
                         </button>
                       </div>
