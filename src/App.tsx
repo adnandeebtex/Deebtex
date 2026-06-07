@@ -29,8 +29,9 @@ type Order   = {
   quantity: number; deadline: string; priority: Priority
   machineCategories: MachineCategory[]
   warpStatus: WarpStatus; notes: string
-  forcedMachineId?: number   // set by user via force-switch — overrides optimizer
-  warpClosed?: boolean       // true = warp is sealed, new same-fabric orders start a new warp group
+  forcedMachineId?: number
+  warpClosed?: boolean
+  warpGroupId?: string   // set when warp is sealed — unique stamp, never shared with new orders
 }
 // A saved textile definition — the "database" entry
 type Textile = {
@@ -71,13 +72,14 @@ async function dbDelete(table: string, id: number) {
 // ─── SCHEDULER ───────────────────────────────────────────────
 const PRI: Record<string,number> = { High:3, Normal:2, Low:1 }
 
-// warpKey for grouping: same fabric + color = same physical warp thread.
-// machineCategories are NOT part of the key — two orders with different
-// category flexibility but same fabric+color use the exact same warp.
+// warpKey: the physical warp identity.
+// Open orders (no warpGroupId): group by fabric+color — optimizer can merge them freely.
+// Sealed orders (warpGroupId set): unique key — NOTHING can ever join that sealed group.
 function warpKey(o: Order) {
+  if (o.warpGroupId) return `${o.fabricType}||${o.color}||sealed::${o.warpGroupId}`
   return `${o.fabricType}||${o.color}`
 }
-// key for schedule-aware grouping: same warp AND same assigned machine
+// key for the warp groups card: warpKey + machine
 function machineWarpKey(o: Order, machineId: number) {
   return `${warpKey(o)}||m${machineId}`
 }
@@ -139,9 +141,8 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
     const q   = map[m.id]
     const ld  = q.reduce((s, x) => s + x.quantity, 0)
     const wk  = warpKey(o)
-    // only score same-warp bonus if the matching orders are NOT closed
-    // closed = warp is sealed, new orders must start a fresh group
-    const sameWarp = q.some(x => warpKey(x) === wk && !x.warpClosed)
+    // sealed groups have unique keys so can never match — safe to score normally
+    const sameWarp = q.some(x => warpKey(x) === wk)
     const cap = m.capacity ?? DEFAULT_CAP
     const overload = ld > cap ? (ld - cap) * 2 : 0
     return (sameWarp ? 10000 : 0) - ld - overload
@@ -751,22 +752,28 @@ export default function App() {
   }
 
   // ── "Warp done, start next"
-  // The physical warp thread is now on the machine and running.
-  // All orders in this group → status becomes "on-machine", warpClosed = true.
-  // They stay on the dashboard. The warp group is sealed — new orders with
-  // the same fabric+color will start a completely separate new warp group.
+  // Seals this warp group permanently with a unique warpGroupId stamp.
+  // Orders → on-machine + warpClosed = true + warpGroupId = unique string.
+  // Because warpGroupId is now part of their warpKey, NO new order can ever
+  // match their key — the group is mathematically isolated forever.
   function warpNextRun(orderIds: number[]) {
+    const groupId = `g${Date.now()}`   // unique stamp for this sealed group
     setOrders(p => p.map(o => {
       if (!orderIds.includes(o.id)) return o
-      const updated: Order = { ...o, warpStatus: "on-machine", warpClosed: true }
+      const updated: Order = {
+        ...o,
+        warpStatus: "on-machine",
+        warpClosed: true,
+        warpGroupId: groupId,
+      }
       dbUpsert("orders", updated as unknown as Record<string, unknown>)
       return updated
     }))
   }
 
   // ── "All orders done"
-  // All orders in this warp group are fully woven and delivered.
-  // They move to history (warpStatus = "done") and disappear from the dashboard.
+  // All orders fully woven — move to history.
+  // Preserve warpGroupId so history can show them grouped correctly.
   function warpGroupDone(orderIds: number[]) {
     setOrders(p => p.map(o => {
       if (!orderIds.includes(o.id)) return o
