@@ -20,12 +20,16 @@ type Priority   = "High" | "Normal" | "Low"
 type WarpStatus = "not-started" | "on-machine" | "done"
 type View       = "dashboard" | "orders" | "machines" | "textiles" | "analytics"
 
-type Machine = { id: number; name: string; category: MachineCategory; capacity: number }
+type Machine = {
+  id: number; name: string; category: MachineCategory; capacity: number
+  outOfOrder?: boolean   // true = machine is down, orders reassigned automatically
+}
 type Order   = {
   id: number; textile: string; color: string; fabricType: string
   quantity: number; deadline: string; priority: Priority
   machineCategories: MachineCategory[]
   warpStatus: WarpStatus; notes: string
+  forcedMachineId?: number   // set by user via force-switch — overrides optimizer
 }
 // A saved textile definition — the "database" entry
 type Textile = {
@@ -93,16 +97,28 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
   const map: Record<number, Order[]> = {}
   machines.forEach(m => { map[m.id] = [] })
 
-  // ── STEP 1: lock in-progress and done orders first — never move them
+  // active machines only — out-of-order machines still get a slot in map
+  // so their on-machine orders show up there, but no new orders go to them
+  const activeMachines = machines.filter(m => !m.outOfOrder)
+
   const locked = new Set<number>()
+
+  // ── STEP 1: forced assignments always go exactly where the user said
   for (const o of orders) {
+    if (o.forcedMachineId !== undefined && map[o.forcedMachineId] !== undefined) {
+      map[o.forcedMachineId].push(o)
+      locked.add(o.id)
+    }
+  }
+
+  // ── STEP 2: lock on-machine and done orders (that aren't already placed)
+  for (const o of orders) {
+    if (locked.has(o.id)) continue
     if (o.warpStatus === "on-machine" || o.warpStatus === "done") {
-      // find the machine this order was already running on by looking at
-      // which machine category matches; pick the first valid one (it was
-      // already on a real machine so just keep it stable via warpKey match)
+      // if the machine it's on is now out-of-order, keep it there visually
+      // (can't move an in-progress warp mid-run) — it shows a warning
       const compat = machines.filter(m => o.machineCategories.includes(m.category))
       if (!compat.length) continue
-      // place on the machine that already has the most matching warp (stable)
       const wk = warpKey(o)
       const existing = compat.find(m => map[m.id].some(x => warpKey(x) === wk)) ?? compat[0]
       map[existing.id].push(o)
@@ -110,36 +126,31 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
     }
   }
 
-  // ── STEP 2: re-optimize ALL not-started orders from scratch every time
-  // Sort by: (a) fewest compatible machines first — most constrained orders
-  //          are placed first so flexible orders bend around them, not vice versa
-  //          (b) then priority (High → Normal → Low)
-  //          (c) then warp key — group same fabric/color together
+  // ── STEP 3: re-optimize all not-started orders (excluding forced+locked)
+  // out-of-order machines are excluded from receiving new orders
   const pending = orders
     .filter(o => !locked.has(o.id))
     .sort((a, b) => {
       const flexDiff = a.machineCategories.length - b.machineCategories.length
-      if (flexDiff !== 0) return flexDiff   // fewer options = goes first
+      if (flexDiff !== 0) return flexDiff
       const priDiff = PRI[b.priority] - PRI[a.priority]
       if (priDiff !== 0) return priDiff
       return warpKey(a).localeCompare(warpKey(b))
     })
 
-  // scoring function: how good is machine m for order o?
   function score(m: Machine, o: Order): number {
-    const q  = map[m.id]
-    const ld = q.reduce((s, x) => s + x.quantity, 0)
-    const wk = warpKey(o)
-    // exact same warp (fabric+color) on this machine = zero changeover needed
-    const sameWarp   = q.some(x => warpKey(x) === wk)
-    // overload penalty
-    const cap        = m.capacity ?? DEFAULT_CAP
-    const overload   = ld > cap ? (ld - cap) * 2 : 0
+    const q   = map[m.id]
+    const ld  = q.reduce((s, x) => s + x.quantity, 0)
+    const wk  = warpKey(o)
+    const sameWarp = q.some(x => warpKey(x) === wk)
+    const cap = m.capacity ?? DEFAULT_CAP
+    const overload = ld > cap ? (ld - cap) * 2 : 0
     return (sameWarp ? 10000 : 0) - ld - overload
   }
 
   for (const o of pending) {
-    const compat = machines.filter(m => o.machineCategories.includes(m.category))
+    // only consider active (non-out-of-order) compatible machines
+    const compat = activeMachines.filter(m => o.machineCategories.includes(m.category))
     if (!compat.length) continue
     const best = compat.reduce((b, m) => score(m, o) > score(b, o) ? m : b)
     map[best.id].push(o)
@@ -516,6 +527,8 @@ export default function App() {
   const [oCats,    setOCats]    = useState<MachineCategory[]>([])
   const [oNotes,   setONotes]   = useState("")
 
+  const [forceSwitchOrder, setForceSwitchOrder] = useState<Order|null>(null)
+
   // ── SUPABASE: initial load + real-time sync ───────────────
   // We keep a flag to avoid re-subscribing on every render
   const subscribed = useRef(false)
@@ -571,29 +584,34 @@ export default function App() {
   // Two orders with different machineCategories but same fabric/color
   // assigned to the same machine share one physical warp — one group.
   const warpGroups = useMemo(() => {
-    const g: Record<string, { label: string; machine: string; meters: number; count: number }> = {}
+    const g: Record<string, {
+      label: string; machine: string; machineId: number|null
+      meters: number; count: number; orderIds: number[]
+    }> = {}
     for (const o of orders) {
-      // find assigned machine from schedule
       const assignedM = machines.find(m => (schedule[m.id] ?? []).some(x => x.id === o.id))
       if (!assignedM) continue
       const key = machineWarpKey(o, assignedM.id)
       if (!g[key]) g[key] = {
         label: `${o.fabricType} · ${o.color}`,
-        machine: assignedM.name,
-        meters: 0,
-        count: 0,
+        machine: assignedM.name, machineId: assignedM.id,
+        meters: 0, count: 0, orderIds: [],
       }
       g[key].meters += calcWarp(o.quantity)
       g[key].count++
+      g[key].orderIds.push(o.id)
     }
-    // also include orders not yet in schedule (no machine assigned)
     for (const o of orders) {
       const inSchedule = machines.some(m => (schedule[m.id] ?? []).some(x => x.id === o.id))
       if (!inSchedule) {
         const key = `${warpKey(o)}||unassigned`
-        if (!g[key]) g[key] = { label: `${o.fabricType} · ${o.color}`, machine: "Unassigned", meters: 0, count: 0 }
+        if (!g[key]) g[key] = {
+          label: `${o.fabricType} · ${o.color}`, machine: "Unassigned", machineId: null,
+          meters: 0, count: 0, orderIds: [],
+        }
         g[key].meters += calcWarp(o.quantity)
         g[key].count++
+        g[key].orderIds.push(o.id)
       }
     }
     return g
@@ -718,6 +736,62 @@ export default function App() {
     setMachines(p => p.filter(m => m.id!==id))
     dbDelete("machines", id)
   }
+
+  // ── FEATURE 1: toggle machine out-of-order
+  // not-started orders re-optimize automatically (scheduler excludes OOO machines)
+  // on-machine orders stay (can't move mid-run) but show a warning
+  function toggleOutOfOrder(m: Machine) {
+    const updated = { ...m, outOfOrder: !m.outOfOrder }
+    setMachines(p => p.map(x => x.id===m.id ? updated : x))
+    dbUpsert("machines", updated as unknown as Record<string, unknown>)
+  }
+
+  // ── FEATURE 2a: "Warp done, start next" — marks the current on-machine
+  // order(s) in this group as done, resets not-started ones so they re-queue
+  function warpNextRun(orderIds: number[]) {
+    setOrders(p => p.map(o => {
+      if (!orderIds.includes(o.id)) return o
+      // on-machine → done (this warp is physically finished)
+      // not-started → stays not-started but forcedMachineId is cleared
+      // so re-optimizer can group the next batch optimally
+      const updated = o.warpStatus === "on-machine"
+        ? { ...o, warpStatus: "done" as WarpStatus }
+        : { ...o, forcedMachineId: undefined }
+      dbUpsert("orders", updated as unknown as Record<string, unknown>)
+      return updated
+    }))
+  }
+
+  // ── FEATURE 2b: "All orders done" — marks every order in the group as done
+  function warpGroupDone(orderIds: number[]) {
+    setOrders(p => p.map(o => {
+      if (!orderIds.includes(o.id)) return o
+      const updated = { ...o, warpStatus: "done" as WarpStatus }
+      dbUpsert("orders", updated as unknown as Record<string, unknown>)
+      return updated
+    }))
+  }
+
+  // ── FEATURE 3: force an order to a specific machine
+  function forceSwitch(orderId: number, machineId: number) {
+    setOrders(p => p.map(o => {
+      if (o.id !== orderId) return o
+      const updated = { ...o, forcedMachineId: machineId, warpStatus: "not-started" as WarpStatus }
+      dbUpsert("orders", updated as unknown as Record<string, unknown>)
+      return updated
+    }))
+    setForceSwitchOrder(null)
+  }
+
+  // clear a force switch (let optimizer decide again)
+  function clearForce(orderId: number) {
+    setOrders(p => p.map(o => {
+      if (o.id !== orderId) return o
+      const updated = { ...o, forcedMachineId: undefined }
+      dbUpsert("orders", updated as unknown as Record<string, unknown>)
+      return updated
+    }))
+  }
   function setWarpSt(id: number, st: WarpStatus) {
     setOrders(p => p.map(o => {
       if (o.id !== id) return o
@@ -797,9 +871,13 @@ export default function App() {
           <div style={{borderTop:"0.5px solid #2e2e3a",paddingTop:10,marginTop:8}}>
             {machines.slice(0,7).map(m=>(
               <div key={m.id} style={{display:"flex",alignItems:"center",gap:8,padding:"3px 10px"}}>
-                <div style={{width:7,height:7,borderRadius:"50%",flexShrink:0,
-                  background:statColor(machineStatus(machineLoad(schedule,m.id),m.capacity))}}/>
-                <span style={{fontSize:11,color:"#6b7280",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                {m.outOfOrder
+                  ? <span style={{fontSize:10,color:"#E24B4A",flexShrink:0}}>⚠</span>
+                  : <div style={{width:7,height:7,borderRadius:"50%",flexShrink:0,
+                      background:statColor(machineStatus(machineLoad(schedule,m.id),m.capacity))}}/>
+                }
+                <span style={{fontSize:11,color:m.outOfOrder?"#E24B4A":"#6b7280",
+                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                   {m.name}
                 </span>
               </div>
@@ -861,32 +939,73 @@ export default function App() {
                   {machines.map(m=>{
                     const q  = schedule[m.id]??[]
                     const ld = machineLoad(schedule,m.id)
-                    const st = machineStatus(ld,m.capacity)
+                    const st = m.outOfOrder ? "OUT OF ORDER" : machineStatus(ld,m.capacity)
                     const pc = loadPct(ld,m.capacity)
+                    const dotBg = m.outOfOrder ? "#E24B4A" : statColor(st)
                     const active = q[0]; const rest = q.slice(1)
                     return (
-                      <div key={m.id} style={{marginBottom:16,paddingBottom:16,borderBottom:"0.5px solid #f0f0f0"}}>
+                      <div key={m.id} style={{marginBottom:16,paddingBottom:16,borderBottom:"0.5px solid #f0f0f0",
+                        opacity: m.outOfOrder ? 0.65 : 1}}>
                         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                          <div style={{width:8,height:8,borderRadius:"50%",background:statColor(st),flexShrink:0}}/>
+                          <div style={{width:8,height:8,borderRadius:"50%",background:dotBg,flexShrink:0}}/>
                           <span style={{fontSize:13,fontWeight:500,flex:1}}>{m.name}</span>
-                          <Badge text={`${ld}m / ${m.capacity}m`} color={statColor(st)}/>
+                          {m.outOfOrder
+                            ? <span style={{background:"#FEEBEB",color:"#E24B4A",borderRadius:4,
+                                padding:"1px 7px",fontSize:11,fontWeight:600}}>OUT OF ORDER</span>
+                            : <Badge text={`${ld}m / ${m.capacity}m`} color={statColor(st)}/>
+                          }
                         </div>
-                        <Bar pct={pc} color={statColor(st)}/>
+                        {!m.outOfOrder && <Bar pct={pc} color={statColor(st)}/>}
+                        {m.outOfOrder && q.some(o=>o.warpStatus==="on-machine") && (
+                          <div style={{fontSize:11,color:"#E24B4A",padding:"4px 0"}}>
+                            ⚠️ In-progress warp cannot be moved. Mark it done when finished.
+                          </div>
+                        )}
                         {q.length===0
                           ? <div style={{fontSize:12,color:"#bbb",paddingTop:4}}>No orders assigned</div>
                           : <>
                             {active&&(
                               <div style={S.activeWarp}>
-                                <div style={S.activeLabel}>Active warp</div>
-                                <div style={{fontSize:13,fontWeight:500}}>{active.textile}</div>
-                                <div style={{fontSize:11,color:"#888"}}>{active.fabricType} · {active.color} · {active.quantity}m</div>
+                                <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
+                                  <div style={{flex:1}}>
+                                    <div style={S.activeLabel}>Active warp</div>
+                                    <div style={{fontSize:13,fontWeight:500}}>{active.textile}</div>
+                                    <div style={{fontSize:11,color:"#888"}}>{active.fabricType} · {active.color} · {active.quantity}m</div>
+                                    {active.forcedMachineId&&(
+                                      <div style={{fontSize:10,color:"#7F77DD",marginTop:2}}>
+                                        ⚡ Force-assigned
+                                        <button onClick={()=>clearForce(active.id)}
+                                          style={{...S.btnIcon,fontSize:10,color:"#aaa",marginLeft:4}}>
+                                          (clear)
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                  <button
+                                    onClick={()=>setForceSwitchOrder(active)}
+                                    style={{...S.btnSm,fontSize:10,padding:"3px 8px",color:"#7F77DD",
+                                      border:"0.5px solid #7F77DD",background:"#F3F2FD",flexShrink:0}}>
+                                    ⚡ Switch machine
+                                  </button>
+                                </div>
                               </div>
                             )}
                             {rest.map((o,i)=>(
-                              <div key={o.id} style={S.qItem}>
-                                <span style={S.qNum}>{i+2}</span>
-                                {o.textile} — {o.fabricType} · {o.color} · {o.quantity}m
-                                {active&&warpKey(o)===warpKey(active)&&<span style={S.sameWarp}>same warp</span>}
+                              <div key={o.id} style={{...S.qItem,justifyContent:"space-between"}}>
+                                <div style={{display:"flex",alignItems:"center",gap:6,flex:1}}>
+                                  <span style={S.qNum}>{i+2}</span>
+                                  <span>
+                                    {o.textile} — {o.fabricType} · {o.color} · {o.quantity}m
+                                    {active&&warpKey(o)===warpKey(active)&&<span style={{...S.sameWarp,marginLeft:4}}>same warp</span>}
+                                    {o.forcedMachineId&&<span style={{...S.sameWarp,marginLeft:4,background:"#F3F2FD",color:"#7F77DD"}}>⚡ forced</span>}
+                                  </span>
+                                </div>
+                                <button
+                                  onClick={()=>setForceSwitchOrder(o)}
+                                  style={{...S.btnSm,fontSize:10,padding:"2px 6px",color:"#7F77DD",
+                                    border:"0.5px solid #c4c0f0",background:"#F3F2FD",flexShrink:0,marginLeft:6}}>
+                                  ⚡
+                                </button>
                               </div>
                             ))}
                           </>
@@ -902,18 +1021,37 @@ export default function App() {
                 <div style={S.cHead}><span style={S.cTitle}>Warp groups</span><span style={S.cSub}>per machine · fabric + color</span></div>
                 <div style={S.cBody}>
                   {Object.keys(warpGroups).length===0&&<div style={S.empty}>No orders yet.</div>}
-                  {Object.entries(warpGroups).map(([key,{label,machine,meters,count}])=>(
-                    <div key={key} style={{display:"flex",alignItems:"center",padding:"8px 0",borderBottom:"0.5px solid #f5f5f5"}}>
-                      <div style={{flex:1}}>
-                        <div style={{fontSize:13,fontWeight:500}}>{label}</div>
-                        <div style={{fontSize:11,color:"#888",display:"flex",alignItems:"center",gap:6,marginTop:2}}>
-                          <span>→ {machine}</span>
-                          <span>·</span>
-                          <span>{count} order{count>1?"s":""}</span>
-                          {count>1&&<span style={S.sameWarp}>same warp</span>}
+                  {Object.entries(warpGroups).map(([key,{label,machine,meters,count,orderIds}])=>(
+                    <div key={key} style={{padding:"10px 0",borderBottom:"0.5px solid #f5f5f5"}}>
+                      <div style={{display:"flex",alignItems:"center"}}>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:13,fontWeight:500}}>{label}</div>
+                          <div style={{fontSize:11,color:"#888",display:"flex",alignItems:"center",gap:6,marginTop:2}}>
+                            <span>→ {machine}</span>
+                            <span>·</span>
+                            <span>{count} order{count>1?"s":""}</span>
+                            {count>1&&<span style={S.sameWarp}>same warp</span>}
+                          </div>
                         </div>
+                        <div style={{fontSize:13,color:"#555",marginRight:10}}>{meters}m</div>
                       </div>
-                      <div style={{fontSize:13,color:"#555"}}>{meters}m</div>
+                      {/* action buttons */}
+                      <div style={{display:"flex",gap:6,marginTop:8}}>
+                        <button
+                          onClick={()=>warpNextRun(orderIds)}
+                          style={{...S.btnSm,fontSize:11,padding:"4px 10px",
+                            background:"#FEF9EE",color:"#92400E",border:"0.5px solid #FCD34D"}}
+                          title="Mark current on-machine orders as done, release next batch">
+                          🔄 Warp done, start next
+                        </button>
+                        <button
+                          onClick={()=>warpGroupDone(orderIds)}
+                          style={{...S.btnSm,fontSize:11,padding:"4px 10px",
+                            background:"#EDFBEE",color:"#166534",border:"0.5px solid #86EFAC"}}
+                          title="Mark ALL orders in this warp group as done">
+                          ✅ All orders done
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -986,20 +1124,45 @@ export default function App() {
                 {machines.length===0&&<div style={S.empty}>No machines added yet.</div>}
                 {machines.map(m=>{
                   const ld = machineLoad(schedule,m.id)
-                  const st = machineStatus(ld,m.capacity)
+                  const st = m.outOfOrder ? "OUT OF ORDER" : machineStatus(ld,m.capacity)
                   const pc = loadPct(ld,m.capacity)
+                  const ooColor = "#E24B4A"
+                  const dotBg = m.outOfOrder ? ooColor : statColor(st)
                   return (
-                    <div key={m.id} style={{display:"flex",alignItems:"flex-start",gap:12,padding:"12px 0",borderBottom:"0.5px solid #f5f5f5"}}>
-                      <div style={{width:8,height:8,borderRadius:"50%",background:statColor(st),marginTop:5,flexShrink:0}}/>
+                    <div key={m.id} style={{display:"flex",alignItems:"flex-start",gap:12,
+                      padding:"14px 0",borderBottom:"0.5px solid #f5f5f5",
+                      opacity: m.outOfOrder ? 0.7 : 1}}>
+                      <div style={{width:8,height:8,borderRadius:"50%",background:dotBg,marginTop:5,flexShrink:0}}/>
                       <div style={{flex:1}}>
-                        <div style={{fontSize:14,fontWeight:500}}>{m.name}</div>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <span style={{fontSize:14,fontWeight:500}}>{m.name}</span>
+                          {m.outOfOrder && (
+                            <span style={{background:"#FEEBEB",color:ooColor,borderRadius:4,
+                              padding:"1px 7px",fontSize:11,fontWeight:600}}>OUT OF ORDER</span>
+                          )}
+                        </div>
                         <div style={{fontSize:12,color:"#888",marginTop:2}}>{m.category}</div>
-                        <Bar pct={pc} color={statColor(st)} h={5}/>
+                        {!m.outOfOrder && <Bar pct={pc} color={statColor(st)} h={5}/>}
+                        {m.outOfOrder && (
+                          <div style={{fontSize:11,color:ooColor,marginTop:4}}>
+                            Not-started orders have been reassigned automatically.
+                          </div>
+                        )}
                       </div>
-                      <div style={{textAlign:"right"}}>
-                        <div style={{fontSize:13}}>{ld}m / {m.capacity}m</div>
-                        <Badge text={st} color={statColor(st)}/>
-                        <div style={{display:"flex",gap:5,justifyContent:"flex-end",marginTop:8}}>
+                      <div style={{textAlign:"right",flexShrink:0}}>
+                        {!m.outOfOrder && <div style={{fontSize:13}}>{ld}m / {m.capacity}m</div>}
+                        {!m.outOfOrder && <Badge text={st} color={statColor(st)}/>}
+                        <div style={{display:"flex",gap:5,justifyContent:"flex-end",marginTop:8,flexWrap:"wrap"}}>
+                          {/* out-of-order toggle */}
+                          <button
+                            onClick={()=>toggleOutOfOrder(m)}
+                            style={{...S.btnSm,
+                              background: m.outOfOrder ? "#639922" : "#FEF3C7",
+                              color:       m.outOfOrder ? "#fff"    : "#92400E",
+                              border:      m.outOfOrder ? "none"    : "0.5px solid #FCD34D",
+                              fontSize:11, padding:"4px 10px"}}>
+                            {m.outOfOrder ? "✓ Back online" : "⚠ Out of order"}
+                          </button>
                           <button style={S.btnIcon} onClick={()=>openEditMachine(m)}>✏️</button>
                           <button style={{...S.btnIcon,color:"#E24B4A"}} onClick={()=>delMachine(m.id)}>🗑</button>
                         </div>
@@ -1171,6 +1334,55 @@ export default function App() {
       {editT&&(
         <Modal title="Edit textile" onClose={()=>{setEditT(null);resetTF()}}>
           <TextileFormUI {...textileFormProps}/>
+        </Modal>
+      )}
+
+      {/* ── FORCE SWITCH MODAL ────────────────────────── */}
+      {forceSwitchOrder&&(
+        <Modal title={`Force switch: ${forceSwitchOrder.textile}`} onClose={()=>setForceSwitchOrder(null)}>
+          <div style={{fontSize:13,color:"#888",marginBottom:16}}>
+            Pick a machine to force-assign this order to. The optimizer will be overridden
+            and this order will stay on the chosen machine until you clear it.
+          </div>
+          <div style={{fontSize:12,color:"#aaa",marginBottom:12}}>
+            Order: {forceSwitchOrder.fabricType} · {forceSwitchOrder.color} · {forceSwitchOrder.quantity}m
+          </div>
+          {machines.filter(m=>!m.outOfOrder).map(m=>{
+            const compat = forceSwitchOrder.machineCategories.includes(m.category)
+            const ld = machineLoad(schedule, m.id)
+            const st = machineStatus(ld, m.capacity)
+            return (
+              <div key={m.id}
+                onClick={()=>compat && forceSwitch(forceSwitchOrder.id, m.id)}
+                style={{
+                  display:"flex", alignItems:"center", gap:12,
+                  padding:"10px 12px", marginBottom:6, borderRadius:8,
+                  border:`1px solid ${compat?"#d0d0d0":"#f0f0f0"}`,
+                  background: compat ? "#fafafa" : "#f7f7f7",
+                  cursor: compat ? "pointer" : "not-allowed",
+                  opacity: compat ? 1 : 0.45,
+                }}
+                onMouseEnter={e=>{ if(compat) e.currentTarget.style.background="#F3F2FD" }}
+                onMouseLeave={e=>{ if(compat) e.currentTarget.style.background="#fafafa" }}
+              >
+                <div style={{width:8,height:8,borderRadius:"50%",background:statColor(st),flexShrink:0}}/>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:13,fontWeight:500}}>{m.name}</div>
+                  <div style={{fontSize:11,color:"#888"}}>{m.category} · {ld}m loaded</div>
+                </div>
+                {!compat && <span style={{fontSize:11,color:"#ccc"}}>incompatible type</span>}
+                {compat && forceSwitchOrder.forcedMachineId===m.id && (
+                  <span style={{...S.sameWarp}}>current</span>
+                )}
+              </div>
+            )
+          })}
+          {forceSwitchOrder.forcedMachineId && (
+            <button style={{...S.btnSm,marginTop:8,width:"100%",color:"#888"}}
+              onClick={()=>{ clearForce(forceSwitchOrder.id); setForceSwitchOrder(null) }}>
+              Clear force — let optimizer decide
+            </button>
+          )}
         </Modal>
       )}
     </div>
