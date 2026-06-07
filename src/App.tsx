@@ -72,11 +72,9 @@ async function dbDelete(table: string, id: number) {
 // ─── SCHEDULER ───────────────────────────────────────────────
 const PRI: Record<string,number> = { High:3, Normal:2, Low:1 }
 
-// warpKey: the physical warp identity.
-// Open orders (no warpGroupId): group by fabric+color — optimizer can merge them freely.
-// Sealed orders (warpGroupId set): unique key — NOTHING can ever join that sealed group.
+// warpKey: the physical warp identity — fabric + color only.
+// Sealing is handled in the scheduler by checking warpClosed directly.
 function warpKey(o: Order) {
-  if (o.warpGroupId) return `${o.fabricType}||${o.color}||sealed::${o.warpGroupId}`
   return `${o.fabricType}||${o.color}`
 }
 // key for the warp groups card: warpKey + machine
@@ -103,32 +101,53 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
   const activeMachines = machines.filter(m => !m.outOfOrder)
   const locked = new Set<number>()
 
-  // ── STEP 1: forced assignments (not-started or on-machine, never done)
+  // ── STEP 1: forced assignments first
   for (const o of orders) {
-    if (o.warpStatus === "done") continue   // done = history only, not in schedule
+    if (o.warpStatus === "done") continue
     if (o.forcedMachineId !== undefined && map[o.forcedMachineId] !== undefined) {
       map[o.forcedMachineId].push(o)
       locked.add(o.id)
     }
   }
 
-  // ── STEP 2: lock ONLY on-machine orders (done orders are excluded entirely)
+  // ── STEP 2: lock on-machine orders to their machine
   for (const o of orders) {
-    if (locked.has(o.id)) continue
-    if (o.warpStatus === "done") continue   // skip — goes to history, not schedule
+    if (locked.has(o.id) || o.warpStatus === "done") continue
     if (o.warpStatus === "on-machine") {
       const compat = machines.filter(m => o.machineCategories.includes(m.category))
       if (!compat.length) continue
-      const wk = warpKey(o)
-      const existing = compat.find(m => map[m.id].some(x => warpKey(x) === wk)) ?? compat[0]
+      // if already placed (same machine has same warpClosed group), use that machine
+      const existing = compat.find(m =>
+        map[m.id].some(x => warpKey(x) === warpKey(o) && x.warpClosed === o.warpClosed)
+      ) ?? compat[0]
       map[existing.id].push(o)
       locked.add(o.id)
     }
   }
 
+  // ── Build a set of sealed slots: "fabricColor||machineId" combos that are CLOSED.
+  // A new not-started order must NOT receive a same-warp bonus if the only matching
+  // orders on that machine are sealed (warpClosed = true).
+  const sealedSlots = new Set<string>()
+  for (const m of machines) {
+    const warpCounts: Record<string, { open: number; closed: number }> = {}
+    for (const o of map[m.id]) {
+      const wk = warpKey(o)
+      if (!warpCounts[wk]) warpCounts[wk] = { open: 0, closed: 0 }
+      if (o.warpClosed) warpCounts[wk].closed++
+      else warpCounts[wk].open++
+    }
+    for (const [wk, counts] of Object.entries(warpCounts)) {
+      // slot is sealed if ALL matching orders on this machine are closed (none open)
+      if (counts.closed > 0 && counts.open === 0) {
+        sealedSlots.add(`${wk}||${m.id}`)
+      }
+    }
+  }
+
   // ── STEP 3: re-optimize all not-started orders
   const pending = orders
-    .filter(o => !locked.has(o.id) && o.warpStatus !== "done")
+    .filter(o => !locked.has(o.id) && o.warpStatus === "not-started")
     .sort((a, b) => {
       const flexDiff = a.machineCategories.length - b.machineCategories.length
       if (flexDiff !== 0) return flexDiff
@@ -141,8 +160,9 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
     const q   = map[m.id]
     const ld  = q.reduce((s, x) => s + x.quantity, 0)
     const wk  = warpKey(o)
-    // sealed groups have unique keys so can never match — safe to score normally
-    const sameWarp = q.some(x => warpKey(x) === wk)
+    // Only give same-warp bonus if the slot is NOT sealed
+    const slotSealed = sealedSlots.has(`${wk}||${m.id}`)
+    const sameWarp = !slotSealed && q.some(x => warpKey(x) === wk)
     const cap = m.capacity ?? DEFAULT_CAP
     const overload = ld > cap ? (ld - cap) * 2 : 0
     return (sameWarp ? 10000 : 0) - ld - overload
@@ -595,7 +615,7 @@ export default function App() {
     for (const o of activeOrders) {
       const assignedM = machines.find(m => (schedule[m.id] ?? []).some(x => x.id === o.id))
       if (!assignedM) continue
-      const key = machineWarpKey(o, assignedM.id) + (o.warpClosed ? "||closed" : "||open")
+      const key = machineWarpKey(o, assignedM.id) + (o.warpClosed ? "||sealed" : "||open")
       if (!g[key]) g[key] = {
         label: `${o.fabricType} · ${o.color}`,
         machine: assignedM.name, machineId: assignedM.id,
@@ -752,20 +772,14 @@ export default function App() {
   }
 
   // ── "Warp done, start next"
-  // Seals this warp group permanently with a unique warpGroupId stamp.
-  // Orders → on-machine + warpClosed = true + warpGroupId = unique string.
-  // Because warpGroupId is now part of their warpKey, NO new order can ever
-  // match their key — the group is mathematically isolated forever.
+  // Seals this warp group. Orders → on-machine + warpClosed = true.
+  // The scheduler's sealedSlots logic blocks any new order from getting
+  // a same-warp bonus on this machine for this fabric+color.
+  // New orders with the same specs will be treated as a fresh separate warp.
   function warpNextRun(orderIds: number[]) {
-    const groupId = `g${Date.now()}`   // unique stamp for this sealed group
     setOrders(p => p.map(o => {
       if (!orderIds.includes(o.id)) return o
-      const updated: Order = {
-        ...o,
-        warpStatus: "on-machine",
-        warpClosed: true,
-        warpGroupId: groupId,
-      }
+      const updated: Order = { ...o, warpStatus: "on-machine", warpClosed: true }
       dbUpsert("orders", updated as unknown as Record<string, unknown>)
       return updated
     }))
