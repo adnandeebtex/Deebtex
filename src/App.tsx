@@ -593,11 +593,10 @@ export default function App() {
   const [historySearch, setHistorySearch] = useState("")
 
   // ── SUPABASE: initial load + real-time sync ───────────────
-  // We keep a flag to avoid re-subscribing on every render
   const subscribed = useRef(false)
 
   useEffect(() => {
-    // 1. Load all data on mount — sanitized so nulls become proper defaults
+    // 1. Load all data on mount
     async function loadAll() {
       const [m, o, t] = await Promise.all([
         dbLoadMachines(),
@@ -614,15 +613,74 @@ export default function App() {
     if (subscribed.current) return
     subscribed.current = true
 
-    // 2. Real-time: reload with sanitized loaders so warpClosed is never null
+    // 2. Real-time: MERGE individual row changes into existing state.
+    //    We do NOT do a full reload — that was overwriting local warpClosed state.
+    //    Instead we use the payload from the real-time event directly.
     const channel = db
       .channel("deebtex-realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "machines" },
-        () => dbLoadMachines().then(setMachines))
-      .on("postgres_changes", { event: "*", schema: "public", table: "orders" },
-        () => dbLoadOrders().then(setOrders))
-      .on("postgres_changes", { event: "*", schema: "public", table: "textiles" },
-        () => dbLoadTextiles().then(setTextiles))
+
+      // ── MACHINES ──
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "machines" },
+        (payload) => {
+          const m = sanitizeMachine(payload.new as Record<string, unknown>)
+          setMachines(p => [...p.filter(x => x.id !== m.id), m])
+        })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "machines" },
+        (payload) => {
+          const m = sanitizeMachine(payload.new as Record<string, unknown>)
+          setMachines(p => p.map(x => x.id === m.id ? m : x))
+        })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "machines" },
+        (payload) => {
+          const id = (payload.old as Record<string, unknown>).id as number
+          setMachines(p => p.filter(x => x.id !== id))
+        })
+
+      // ── ORDERS ──
+      // INSERT: add new order (from another computer adding it)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "orders" },
+        (payload) => {
+          const o = sanitizeOrder(payload.new as Record<string, unknown>)
+          // only add if we don't already have it locally (we add it locally on save)
+          setOrders(p => p.some(x => x.id === o.id) ? p : [...p, o])
+        })
+      // UPDATE: merge — but NEVER downgrade warpClosed from true to false
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "orders" },
+        (payload) => {
+          const incoming = sanitizeOrder(payload.new as Record<string, unknown>)
+          setOrders(p => p.map(x => {
+            if (x.id !== incoming.id) return x
+            return {
+              ...incoming,
+              // If local state has warpClosed=true, NEVER let DB overwrite it with false.
+              // This is the core of the fix — the seal is permanent once set locally.
+              warpClosed: x.warpClosed === true ? true : incoming.warpClosed,
+            }
+          }))
+        })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "orders" },
+        (payload) => {
+          const id = (payload.old as Record<string, unknown>).id as number
+          setOrders(p => p.filter(x => x.id !== id))
+        })
+
+      // ── TEXTILES ──
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "textiles" },
+        (payload) => {
+          const t = payload.new as Textile
+          setTextiles(p => p.some(x => x.id === t.id) ? p : [...p, t])
+        })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "textiles" },
+        (payload) => {
+          const t = payload.new as Textile
+          setTextiles(p => p.map(x => x.id === t.id ? t : x))
+        })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "textiles" },
+        (payload) => {
+          const id = (payload.old as Record<string, unknown>).id as number
+          setTextiles(p => p.filter(x => x.id !== id))
+        })
+
       .subscribe()
 
     return () => { db.removeChannel(channel) }
