@@ -50,11 +50,54 @@ const CATS: MachineCategory[] = [
 const DEFAULT_CAP = 1000
 
 // ─── SUPABASE HELPERS ────────────────────────────────────────
-// Generic fetch — returns all rows from a table
-async function dbLoad<T>(table: string): Promise<T[]> {
+async function dbLoadRaw<T>(table: string): Promise<T[]> {
   const { data, error } = await db.from(table).select("*").order("id")
   if (error) { console.error(`dbLoad ${table}:`, error.message); return [] }
   return (data ?? []) as T[]
+}
+
+// Orders need sanitization — boolean columns can come back as null from Supabase
+// if the column was added after rows were created (default wasn't backfilled)
+function sanitizeOrder(row: Record<string, unknown>): Order {
+  return {
+    id:                Number(row.id),
+    textile:           String(row.textile ?? ""),
+    color:             String(row.color ?? ""),
+    fabricType:        String(row.fabricType ?? ""),
+    quantity:          Number(row.quantity ?? 0),
+    deadline:          String(row.deadline ?? ""),
+    priority:          (row.priority as Priority) ?? "Normal",
+    machineCategories: (row.machineCategories as MachineCategory[]) ?? [],
+    warpStatus:        (row.warpStatus as WarpStatus) ?? "not-started",
+    notes:             String(row.notes ?? ""),
+    forcedMachineId:   row.forcedMachineId != null ? Number(row.forcedMachineId) : undefined,
+    // CRITICAL: null from DB must become false — never undefined or null
+    warpClosed:        row.warpClosed === true,
+  }
+}
+
+function sanitizeMachine(row: Record<string, unknown>): Machine {
+  return {
+    id:         Number(row.id),
+    name:       String(row.name ?? ""),
+    category:   (row.category as MachineCategory) ?? "Electronic Double",
+    capacity:   Number(row.capacity ?? 1000),
+    outOfOrder: row.outOfOrder === true,
+  }
+}
+
+async function dbLoadOrders(): Promise<Order[]> {
+  const rows = await dbLoadRaw<Record<string, unknown>>("orders")
+  return rows.map(sanitizeOrder)
+}
+
+async function dbLoadMachines(): Promise<Machine[]> {
+  const rows = await dbLoadRaw<Record<string, unknown>>("machines")
+  return rows.map(sanitizeMachine)
+}
+
+async function dbLoadTextiles(): Promise<Textile[]> {
+  return dbLoadRaw<Textile>("textiles")
 }
 
 // Upsert a full row (insert or update by id)
@@ -554,12 +597,12 @@ export default function App() {
   const subscribed = useRef(false)
 
   useEffect(() => {
-    // 1. Load all data on mount
+    // 1. Load all data on mount — sanitized so nulls become proper defaults
     async function loadAll() {
       const [m, o, t] = await Promise.all([
-        dbLoad<Machine>("machines"),
-        dbLoad<Order>("orders"),
-        dbLoad<Textile>("textiles"),
+        dbLoadMachines(),
+        dbLoadOrders(),
+        dbLoadTextiles(),
       ])
       setMachines(m)
       setOrders(o)
@@ -571,16 +614,15 @@ export default function App() {
     if (subscribed.current) return
     subscribed.current = true
 
-    // 2. Real-time: any INSERT/UPDATE/DELETE on these tables
-    //    instantly updates every connected computer
+    // 2. Real-time: reload with sanitized loaders so warpClosed is never null
     const channel = db
       .channel("deebtex-realtime")
       .on("postgres_changes", { event: "*", schema: "public", table: "machines" },
-        () => dbLoad<Machine>("machines").then(setMachines))
+        () => dbLoadMachines().then(setMachines))
       .on("postgres_changes", { event: "*", schema: "public", table: "orders" },
-        () => dbLoad<Order>("orders").then(setOrders))
+        () => dbLoadOrders().then(setOrders))
       .on("postgres_changes", { event: "*", schema: "public", table: "textiles" },
-        () => dbLoad<Textile>("textiles").then(setTextiles))
+        () => dbLoadTextiles().then(setTextiles))
       .subscribe()
 
     return () => { db.removeChannel(channel) }
