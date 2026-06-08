@@ -29,9 +29,10 @@ type Order   = {
   quantity: number; deadline: string; priority: Priority
   machineCategories: MachineCategory[]
   warpStatus: WarpStatus; notes: string
+  orderNumber?: string   // branch reference e.g. "ORD-2024-001"
   forcedMachineId?: number
   warpClosed?: boolean
-  warpGroupId?: string   // set when warp is sealed — unique stamp, never shared with new orders
+  warpGroupId?: string
 }
 // A saved textile definition — the "database" entry
 type Textile = {
@@ -70,8 +71,8 @@ function sanitizeOrder(row: Record<string, unknown>): Order {
     machineCategories: (row.machineCategories as MachineCategory[]) ?? [],
     warpStatus:        (row.warpStatus as WarpStatus) ?? "not-started",
     notes:             String(row.notes ?? ""),
+    orderNumber:       row.orderNumber ? String(row.orderNumber) : undefined,
     forcedMachineId:   row.forcedMachineId != null ? Number(row.forcedMachineId) : undefined,
-    // CRITICAL: null from DB must become false — never undefined or null
     warpClosed:        row.warpClosed === true,
   }
 }
@@ -284,23 +285,86 @@ function Badge({ text, color }: { text:string; color:string }) {
   )
 }
 
-// ─── ORDER FORM (top-level component — fixes the remount bug) ─
+// ─── AUTOCOMPLETE INPUT ──────────────────────────────────────
+// Reusable input with dropdown suggestions from a known list.
+// Supports Arabic and any language. Matches anywhere in the string.
+// Purely for convenience — doesn't affect any logic or scheduling.
+type ACProps = {
+  value: string
+  onChange: (v: string) => void
+  suggestions: string[]   // all known values to match against
+  placeholder?: string
+}
+function AutocompleteInput({ value, onChange, suggestions, placeholder }: ACProps) {
+  const [open, setOpen] = useState(false)
+
+  const matches = useMemo(() => {
+    if (!value.trim()) return suggestions.slice(0, 8)  // show recent when empty
+    const q = value.toLowerCase()
+    return suggestions.filter(s => s.toLowerCase().includes(q)).slice(0, 8)
+  }, [value, suggestions])
+
+  const showDropdown = open && matches.length > 0 && (
+    // hide if current value exactly matches a suggestion (already picked)
+    !matches.some(m => m.toLowerCase() === value.toLowerCase()) || value.trim() === ""
+  )
+
+  return (
+    <div style={{ position:"relative" }}>
+      <input
+        style={S.input}
+        value={value}
+        placeholder={placeholder}
+        onChange={e => { onChange(e.target.value); setOpen(true) }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        autoComplete="off"
+        dir="auto"   // supports RTL (Arabic) automatically
+      />
+      {showDropdown && (
+        <div style={{
+          position:"absolute", top:"calc(100% + 2px)", left:0, right:0, zIndex:60,
+          background:"#fff", border:"0.5px solid #e0e0e0", borderRadius:8,
+          boxShadow:"0 4px 16px rgba(0,0,0,0.10)", overflow:"hidden",
+        }}>
+          {matches.map(s => (
+            <div
+              key={s}
+              onMouseDown={() => { onChange(s); setOpen(false) }}
+              style={{
+                padding:"8px 12px", fontSize:13, cursor:"pointer",
+                borderBottom:"0.5px solid #f5f5f5",
+                direction:"auto" as unknown as CSSProperties["direction"],
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = "#F3F2FD")}
+              onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+            >
+              {s}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 type OFProps = {
-  textiles: Textile[]           // the saved textile database
+  textiles: Textile[]
   selectedTextileId: number|null
   textile:string; color:string; fabricType:string; quantity:string
   deadline:string; priority:Priority; categories:MachineCategory[]; notes:string
+  orderNumber:string
   isEdit:boolean
   set: {
     selectedTextileId:(v:number|null)=>void
     textile:(v:string)=>void; color:(v:string)=>void; fabricType:(v:string)=>void
     quantity:(v:string)=>void; deadline:(v:string)=>void; priority:(v:Priority)=>void
     categories:(v:MachineCategory[])=>void; notes:(v:string)=>void
+    orderNumber:(v:string)=>void
   }
   onSave:()=>void
 }
 
-function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quantity,deadline,priority,categories,notes,isEdit,set,onSave }: OFProps) {
+function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quantity,deadline,priority,categories,notes,orderNumber,isEdit,set,onSave }: OFProps) {
   const fromDB = selectedTextileId !== null
   const [txSearch, setTxSearch] = useState("")
   const [txOpen,   setTxOpen]   = useState(false)
@@ -455,6 +519,10 @@ function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quant
             <option>High</option><option>Normal</option><option>Low</option>
           </select>
         </Field>
+        <Field label="Order number (optional)">
+          <input style={S.input} value={orderNumber} onChange={e=>set.orderNumber(e.target.value)}
+            placeholder="e.g. ORD-2024-001" dir="auto" />
+        </Field>
         <Field label="Notes (optional)">
           <input style={S.input} value={notes} onChange={e=>set.notes(e.target.value)} placeholder="Special instructions…" />
         </Field>
@@ -497,6 +565,8 @@ function MachineFormUI({ name,category,capacity,isEdit,set,onSave }: MFProps) {
 type TFProps = {
   name:string; color:string; fabricType:string
   categories:MachineCategory[]; notes:string; isEdit:boolean
+  knownColors: string[]      // autocomplete suggestions for color
+  knownFabrics: string[]     // autocomplete suggestions for fabric type
   set: {
     name:(v:string)=>void; color:(v:string)=>void; fabricType:(v:string)=>void
     categories:(v:MachineCategory[])=>void; notes:(v:string)=>void
@@ -504,7 +574,7 @@ type TFProps = {
   onSave:()=>void
 }
 
-function TextileFormUI({ name,color,fabricType,categories,notes,isEdit,set,onSave }: TFProps) {
+function TextileFormUI({ name,color,fabricType,categories,notes,isEdit,knownColors,knownFabrics,set,onSave }: TFProps) {
   function toggleCat(cat: MachineCategory) {
     set.categories(categories.includes(cat) ? categories.filter(c=>c!==cat) : [...categories,cat])
   }
@@ -512,13 +582,24 @@ function TextileFormUI({ name,color,fabricType,categories,notes,isEdit,set,onSav
     <>
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
         <Field label="Textile name">
-          <input style={S.input} value={name} onChange={e=>set.name(e.target.value)} placeholder="e.g. Blue Gabardine" />
+          <input style={S.input} value={name} onChange={e=>set.name(e.target.value)}
+            placeholder="e.g. جاكار بيج" dir="auto" />
         </Field>
         <Field label="Color">
-          <input style={S.input} value={color} onChange={e=>set.color(e.target.value)} placeholder="e.g. Navy" />
+          <AutocompleteInput
+            value={color}
+            onChange={set.color}
+            suggestions={knownColors}
+            placeholder="e.g. بيج"
+          />
         </Field>
         <Field label="Fabric type">
-          <input style={S.input} value={fabricType} onChange={e=>set.fabricType(e.target.value)} placeholder="e.g. Wool" />
+          <AutocompleteInput
+            value={fabricType}
+            onChange={set.fabricType}
+            suggestions={knownFabrics}
+            placeholder="e.g. جاكار"
+          />
         </Field>
       </div>
       <Field label="Compatible machine types">
@@ -588,6 +669,7 @@ export default function App() {
   const [oPri,     setOPri]     = useState<Priority>("Normal")
   const [oCats,    setOCats]    = useState<MachineCategory[]>([])
   const [oNotes,   setONotes]   = useState("")
+  const [oOrderNum,setOOrderNum]= useState("")
 
   const [forceSwitchOrder, setForceSwitchOrder] = useState<Order|null>(null)
   const [historySearch, setHistorySearch] = useState("")
@@ -806,7 +888,7 @@ export default function App() {
   function resetOF() {
     setOSelId(null)
     setOTextile(""); setOColor(""); setOFabric(""); setOQty("")
-    setODl(""); setOPri("Normal"); setOCats([]); setONotes("")
+    setODl(""); setOPri("Normal"); setOCats([]); setONotes(""); setOOrderNum("")
   }
 
   function saveOrder() {
@@ -816,6 +898,7 @@ export default function App() {
       textile:oTextile, color:oColor, fabricType:oFabric,
       quantity:Number(oQty), deadline:oDl, priority:oPri,
       machineCategories:oCats, warpStatus:editO?.warpStatus??"not-started", notes:oNotes,
+      orderNumber: oOrderNum.trim() || undefined,
     }
     if (editO) {
       setOrders(p => p.map(o => o.id===editO.id ? data : o))
@@ -850,7 +933,8 @@ export default function App() {
     setOSelId(null)
     setOTextile(o.textile); setOColor(o.color); setOFabric(o.fabricType)
     setOQty(String(o.quantity)); setODl(o.deadline); setOPri(o.priority)
-    setOCats(o.machineCategories ?? []); setONotes(o.notes); setEditO(o)
+    setOCats(o.machineCategories ?? []); setONotes(o.notes)
+    setOOrderNum(o.orderNumber ?? ""); setEditO(o)
   }
 
   function delOrder(id: number) {
@@ -943,12 +1027,13 @@ export default function App() {
     textiles, selectedTextileId:oSelId,
     textile:oTextile, color:oColor, fabricType:oFabric, quantity:oQty,
     deadline:oDl, priority:oPri, categories:oCats, notes:oNotes,
+    orderNumber:oOrderNum,
     isEdit:!!editO,
     set:{
       selectedTextileId:setOSelId,
       textile:setOTextile, color:setOColor, fabricType:setOFabric,
       quantity:setOQty, deadline:setODl, priority:setOPri,
-      categories:setOCats, notes:setONotes,
+      categories:setOCats, notes:setONotes, orderNumber:setOOrderNum,
     },
     onSave:saveOrder,
   }
@@ -959,10 +1044,21 @@ export default function App() {
   }
   const textileFormProps: TFProps = {
     name:tName, color:tColor, fabricType:tFab, categories:tCats, notes:tNotes,
-    isEdit:!!editT,
+    isEdit:!!editT, knownColors, knownFabrics,
     set:{ name:setTName, color:setTColor, fabricType:setTFab, categories:setTCats, notes:setTNotes },
     onSave:saveTextile,
   }
+
+  // ── DERIVED: unique sorted color and fabric lists from textile DB
+  const knownColors = useMemo(() => {
+    const set = new Set(textiles.map(t => t.color).filter(Boolean))
+    return [...set].sort((a, b) => a.localeCompare(b, "ar"))
+  }, [textiles])
+
+  const knownFabrics = useMemo(() => {
+    const set = new Set(textiles.map(t => t.fabricType).filter(Boolean))
+    return [...set].sort((a, b) => a.localeCompare(b, "ar"))
+  }, [textiles])
 
   // ── DERIVED ───────────────────────────────────────────────
   const totalLoad = orders.reduce((s,o)=>s+o.quantity,0)
@@ -1231,6 +1327,7 @@ export default function App() {
                           </div>
                         )}
                         {o.notes&&<div style={{fontSize:11,color:"#aaa",marginTop:2,fontStyle:"italic"}}>{o.notes}</div>}
+                        {o.orderNumber&&<div style={{fontSize:11,color:"#7F77DD",marginTop:2,fontWeight:500}}>#{o.orderNumber}</div>}
                         {assignedMachine&&<div style={{fontSize:11,color:"#7F77DD",marginTop:2}}>→ {assignedMachine.name}</div>}
                       </div>
                       <div style={{display:"flex",flexDirection:"column",gap:5,alignItems:"flex-end"}}>
@@ -1470,6 +1567,7 @@ export default function App() {
                             </div>
                           )}
                           {o.notes&&<div style={{fontSize:11,color:"#bbb",marginTop:2,fontStyle:"italic"}}>{o.notes}</div>}
+                          {o.orderNumber&&<div style={{fontSize:11,color:"#9ca3af",marginTop:2,fontWeight:500}}>#{o.orderNumber}</div>}
                         </div>
                         <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
                           <Badge text="Done" color="#639922"/>
