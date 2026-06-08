@@ -1022,7 +1022,21 @@ export default function App() {
     a.download = "deebtex-orders.csv"; a.click()
   }
 
-  // prop bundles
+  // ── DERIVED: must come BEFORE prop bundles that use them ──
+  const knownColors = useMemo(() => {
+    const seen = new Set(textiles.map(t => t.color).filter(Boolean))
+    return [...seen].sort((a, b) => a.localeCompare(b, "ar"))
+  }, [textiles])
+
+  const knownFabrics = useMemo(() => {
+    const seen = new Set(textiles.map(t => t.fabricType).filter(Boolean))
+    return [...seen].sort((a, b) => a.localeCompare(b, "ar"))
+  }, [textiles])
+
+  const totalLoad = orders.reduce((s,o)=>s+o.quantity,0)
+  const highCnt   = orders.filter(o=>o.priority==="High").length
+
+  // ── PROP BUNDLES ──────────────────────────────────────────
   const orderFormProps: OFProps = {
     textiles, selectedTextileId:oSelId,
     textile:oTextile, color:oColor, fabricType:oFabric, quantity:oQty,
@@ -1048,21 +1062,6 @@ export default function App() {
     set:{ name:setTName, color:setTColor, fabricType:setTFab, categories:setTCats, notes:setTNotes },
     onSave:saveTextile,
   }
-
-  // ── DERIVED: unique sorted color and fabric lists from textile DB
-  const knownColors = useMemo(() => {
-    const set = new Set(textiles.map(t => t.color).filter(Boolean))
-    return [...set].sort((a, b) => a.localeCompare(b, "ar"))
-  }, [textiles])
-
-  const knownFabrics = useMemo(() => {
-    const set = new Set(textiles.map(t => t.fabricType).filter(Boolean))
-    return [...set].sort((a, b) => a.localeCompare(b, "ar"))
-  }, [textiles])
-
-  // ── DERIVED ───────────────────────────────────────────────
-  const totalLoad = orders.reduce((s,o)=>s+o.quantity,0)
-  const highCnt   = orders.filter(o=>o.priority==="High").length
 
   // ── NAV ───────────────────────────────────────────────────
   const NAV: {id:View;icon:string;label:string}[] = [
