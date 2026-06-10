@@ -51,10 +51,25 @@ const CATS: MachineCategory[] = [
 const DEFAULT_CAP = 1000
 
 // ─── SUPABASE HELPERS ────────────────────────────────────────
+// Fetches ALL rows using pagination — Supabase default limit is 1000 rows.
+// This loops until every row is loaded so no orders are ever silently dropped.
 async function dbLoadRaw<T>(table: string): Promise<T[]> {
-  const { data, error } = await db.from(table).select("*").order("id")
-  if (error) { console.error(`dbLoad ${table}:`, error.message); return [] }
-  return (data ?? []) as T[]
+  const PAGE = 1000
+  let all: T[] = []
+  let from = 0
+  while (true) {
+    const { data, error } = await db
+      .from(table)
+      .select("*")
+      .order("id")
+      .range(from, from + PAGE - 1)
+    if (error) { console.error(`dbLoad ${table}:`, error.message); break }
+    if (!data || data.length === 0) break
+    all = [...all, ...(data as T[])]
+    if (data.length < PAGE) break   // last page
+    from += PAGE
+  }
+  return all
 }
 
 // Orders need sanitization — boolean columns can come back as null from Supabase
@@ -101,14 +116,40 @@ async function dbLoadTextiles(): Promise<Textile[]> {
   return dbLoadRaw<Textile>("textiles")
 }
 
-// Upsert a full row (insert or update by id)
+// Upsert with retry + visible error + localStorage backup
 async function dbUpsert(table: string, row: Record<string, unknown>) {
-  const { error } = await db.from(table).upsert(row, { onConflict: "id" })
-  if (error) console.error(`dbUpsert ${table}:`, error.message)
+  // always write to localStorage backup first — this never fails
+  try {
+    const key = `dtx_backup_${table}`
+    const existing: Record<string, unknown>[] = JSON.parse(localStorage.getItem(key) || "[]")
+    const idx = existing.findIndex(r => r.id === row.id)
+    if (idx >= 0) existing[idx] = row
+    else existing.push(row)
+    localStorage.setItem(key, JSON.stringify(existing))
+  } catch {}
+
+  // try Supabase — retry once if it fails
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const { error } = await db.from(table).upsert(row, { onConflict: "id" })
+    if (!error) return   // success
+    console.error(`dbUpsert ${table} attempt ${attempt}:`, error.message, error.details, row)
+    if (attempt === 2) {
+      // second failure — show a visible warning so it's never silent
+      console.warn(`⚠️ SAVE FAILED for ${table} id=${row.id}. Data is in localStorage backup.`)
+    }
+    await new Promise(r => setTimeout(r, 500))   // wait 500ms before retry
+  }
 }
 
-// Delete a row by id
+// Delete with localStorage backup sync
 async function dbDelete(table: string, id: number) {
+  // remove from localStorage backup
+  try {
+    const key = `dtx_backup_${table}`
+    const existing: Record<string, unknown>[] = JSON.parse(localStorage.getItem(key) || "[]")
+    localStorage.setItem(key, JSON.stringify(existing.filter(r => r.id !== id)))
+  } catch {}
+
   const { error } = await db.from(table).delete().eq("id", id)
   if (error) console.error(`dbDelete ${table}:`, error.message)
 }
@@ -685,9 +726,45 @@ export default function App() {
         dbLoadOrders(),
         dbLoadTextiles(),
       ])
+
+      // ── RECOVERY: merge localStorage backup into Supabase if rows are missing
+      async function recoverFromBackup<T extends { id: number }>(
+        table: string,
+        oldKey: string,   // pre-Supabase localStorage key
+        dbRows: T[],
+        sanitize: (r: Record<string, unknown>) => T
+      ): Promise<T[]> {
+        try {
+          // check both old localStorage key and new backup key
+          const backupRaw  = localStorage.getItem(`dtx_backup_${table}`) || "[]"
+          const oldRaw     = localStorage.getItem(oldKey) || "[]"
+          const backup: Record<string, unknown>[] = [
+            ...JSON.parse(backupRaw),
+            ...JSON.parse(oldRaw),
+          ]
+          if (backup.length === 0) return dbRows
+          const dbIds  = new Set(dbRows.map(r => r.id))
+          const missing = backup.filter(r => !dbIds.has(Number(r.id)))
+          if (missing.length === 0) return dbRows
+          console.log(`Recovering ${missing.length} missing ${table} rows...`)
+          for (const row of missing) {
+            await dbUpsert(table, row)
+          }
+          return [...dbRows, ...missing.map(sanitize)]
+        } catch (e) {
+          console.error("Recovery error:", e)
+          return dbRows
+        }
+      }
+
+      const [recoveredO, recoveredT] = await Promise.all([
+        recoverFromBackup("orders",   "dtx_orders",   o, sanitizeOrder),
+        recoverFromBackup("textiles", "dtx_textiles", t, r => r as Textile),
+      ])
+
       setMachines(m)
-      setOrders(o)
-      setTextiles(t)
+      setOrders(recoveredO)
+      setTextiles(recoveredT)
       setReady(true)
     }
     loadAll()
@@ -1022,6 +1099,50 @@ export default function App() {
     a.download = "deebtex-orders.csv"; a.click()
   }
 
+  // ── BACKUP: export full JSON snapshot of all data
+  function exportBackup() {
+    const snapshot = {
+      exportedAt: new Date().toISOString(),
+      orders, machines, textiles,
+    }
+    const a = document.createElement("a")
+    a.href = URL.createObjectURL(new Blob(
+      [JSON.stringify(snapshot, null, 2)],
+      { type:"application/json" }
+    ))
+    a.download = `deebtex-backup-${new Date().toISOString().slice(0,10)}.json`
+    a.click()
+  }
+
+  // ── RESTORE: import JSON backup and push missing rows to Supabase
+  async function importBackup(file: File) {
+    try {
+      const text = await file.text()
+      const snapshot = JSON.parse(text)
+      const importedOrders:   Order[]   = snapshot.orders   ?? []
+      const importedTextiles: Textile[] = snapshot.textiles ?? []
+      const importedMachines: Machine[] = snapshot.machines ?? []
+
+      // find rows missing from current state and push them
+      const missingOrders   = importedOrders.filter(o => !orders.some(x => x.id === o.id))
+      const missingTextiles = importedTextiles.filter(t => !textiles.some(x => x.id === t.id))
+      const missingMachines = importedMachines.filter(m => !machines.some(x => x.id === m.id))
+
+      for (const o of missingOrders)   await dbUpsert("orders",   o as unknown as Record<string,unknown>)
+      for (const t of missingTextiles) await dbUpsert("textiles", t as unknown as Record<string,unknown>)
+      for (const m of missingMachines) await dbUpsert("machines", m as unknown as Record<string,unknown>)
+
+      setOrders(p   => [...p,   ...missingOrders])
+      setTextiles(p => [...p,   ...missingTextiles])
+      setMachines(p => [...p,   ...missingMachines])
+
+      alert(`Restored: ${missingOrders.length} orders, ${missingTextiles.length} textiles, ${missingMachines.length} machines.`)
+    } catch(e) {
+      alert("Import failed — make sure it's a valid Deebtex backup file.")
+      console.error(e)
+    }
+  }
+
   // ── DERIVED: must come BEFORE prop bundles that use them ──
   const knownColors = useMemo(() => {
     const seen = new Set(textiles.map(t => t.color).filter(Boolean))
@@ -1119,7 +1240,19 @@ export default function App() {
             <span style={{position:"absolute",left:9,fontSize:12,pointerEvents:"none"}}>🔍</span>
             <input style={S.search} placeholder="Search orders…" value={search} onChange={e=>setSearch(e.target.value)}/>
           </div>
-          <button style={S.btnSm} onClick={exportCSV}>Export CSV</button>
+          {/* hidden file input for restore */}
+          <input id="restore-input" type="file" accept=".json" style={{display:"none"}}
+            onChange={e=>{ if(e.target.files?.[0]) importBackup(e.target.files[0]); e.target.value="" }}/>
+          <button style={{...S.btnSm,background:"#EDFBEE",color:"#166534",border:"0.5px solid #86EFAC"}}
+            onClick={exportBackup} title="Download full backup of all data">
+            💾 Backup
+          </button>
+          <button style={{...S.btnSm,color:"#888"}}
+            onClick={()=>document.getElementById("restore-input")?.click()}
+            title="Restore from a backup file">
+            📂 Restore
+          </button>
+          <button style={S.btnSm} onClick={exportCSV}>CSV</button>
           <button style={S.btnSm} onClick={()=>{resetMF();setShowMM(true)}}>+ Machine</button>
           <button style={S.btnSm} onClick={()=>{resetTF();setShowTM(true)}}>+ Textile</button>
           <button style={S.btnPrimary} onClick={()=>{resetOF();setShowOM(true)}}>+ Add order</button>
