@@ -18,7 +18,11 @@ type MachineCategory =
   | "Mechanical Double 280" | "Mechanical Double 140"
 type Priority   = "High" | "Normal" | "Low"
 type WarpStatus = "not-started" | "on-machine" | "done"
-type View       = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history"
+type View = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history" | "suggestions"
+
+// warpOrder: per-machine ordered list of warpKeys — controls which warp group runs first
+// key = machineId, value = array of warpKeys in display order
+type WarpOrder = Record<number, string[]>
 
 type Machine = {
   id: number; name: string; category: MachineCategory; capacity: number
@@ -258,6 +262,48 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
     if (!compat.length) continue
     const best = compat.reduce((b, m) => score(m, o) > score(b, o) ? m : b)
     map[best.id].push(o)
+  }
+
+  // ── STEP 4: sort each machine's queue
+  // on-machine orders first (already running), then not-started grouped by warpKey
+  // within each warp group: highest priority first, then earliest deadline
+  for (const m of machines) {
+    const q = map[m.id]
+    if (q.length < 2) continue
+
+    // separate on-machine (locked/running) from not-started
+    const running    = q.filter(o => o.warpStatus === "on-machine")
+    const notStarted = q.filter(o => o.warpStatus !== "on-machine")
+
+    // group not-started by warpKey, sort groups by: highest priority in group, then earliest deadline
+    const warpGroupMap: Record<string, Order[]> = {}
+    for (const o of notStarted) {
+      const wk = warpKey(o)
+      if (!warpGroupMap[wk]) warpGroupMap[wk] = []
+      warpGroupMap[wk].push(o)
+    }
+    // sort within each group
+    for (const wk of Object.keys(warpGroupMap)) {
+      warpGroupMap[wk].sort((a, b) => {
+        const pd = PRI[b.priority] - PRI[a.priority]
+        if (pd !== 0) return pd
+        if (a.deadline && b.deadline) return a.deadline.localeCompare(b.deadline)
+        if (a.deadline) return -1
+        if (b.deadline) return 1
+        return 0
+      })
+    }
+    // sort groups themselves: group with highest-priority order first, then earliest deadline in group
+    const sortedGroups = Object.values(warpGroupMap).sort((ga, gb) => {
+      const pa = Math.max(...ga.map(o => PRI[o.priority]))
+      const pb = Math.max(...gb.map(o => PRI[o.priority]))
+      if (pa !== pb) return pb - pa
+      const da = ga.map(o => o.deadline).filter(Boolean).sort()[0] ?? "9999"
+      const db2 = gb.map(o => o.deadline).filter(Boolean).sort()[0] ?? "9999"
+      return da.localeCompare(db2)
+    })
+
+    map[m.id] = [...running, ...sortedGroups.flat()]
   }
 
   return map
@@ -714,6 +760,8 @@ export default function App() {
 
   const [forceSwitchOrder, setForceSwitchOrder] = useState<Order|null>(null)
   const [historySearch, setHistorySearch] = useState("")
+  const [warpOrder, setWarpOrder] = useState<WarpOrder>({})
+  const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(new Set())
 
   // ── SUPABASE: initial load + real-time sync ───────────────
   const subscribed = useRef(false)
@@ -1059,6 +1107,55 @@ export default function App() {
     }
   }
 
+  // Move a warp group up or down in a machine's queue
+  function moveWarpGroup(machineId: number, wk: string, dir: "up" | "down") {
+    const q = schedule[machineId] ?? []
+    // get unique warp keys in current order (excluding on-machine which are locked at top)
+    const runningKeys = [...new Set(
+      q.filter(o => o.warpStatus === "on-machine").map(o => warpKey(o))
+    )]
+    const pendingKeys = [...new Set(
+      q.filter(o => o.warpStatus !== "on-machine").map(o => warpKey(o))
+    )]
+    // apply existing warpOrder if present
+    const currentOrder = warpOrder[machineId] ?? pendingKeys
+    // ensure all current keys are in the list (new ones appended)
+    const merged = [
+      ...currentOrder.filter(k => pendingKeys.includes(k)),
+      ...pendingKeys.filter(k => !currentOrder.includes(k)),
+    ]
+    const idx = merged.indexOf(wk)
+    if (idx === -1) return
+    if (dir === "up" && idx === 0) return
+    if (dir === "down" && idx === merged.length - 1) return
+    const newOrder = [...merged]
+    const swap = dir === "up" ? idx - 1 : idx + 1
+    ;[newOrder[idx], newOrder[swap]] = [newOrder[swap], newOrder[idx]]
+    setWarpOrder(p => ({ ...p, [machineId]: newOrder }))
+  }
+
+  // Get the queue for a machine with manual warpOrder applied
+  function getOrderedQueue(machineId: number): Order[] {
+    const q = schedule[machineId] ?? []
+    const running    = q.filter(o => o.warpStatus === "on-machine")
+    const notStarted = q.filter(o => o.warpStatus !== "on-machine")
+    const customOrder = warpOrder[machineId]
+    if (!customOrder) return [...running, ...notStarted]
+    // group not-started by warpKey
+    const groups: Record<string, Order[]> = {}
+    for (const o of notStarted) {
+      const wk = warpKey(o)
+      if (!groups[wk]) groups[wk] = []
+      groups[wk].push(o)
+    }
+    // apply custom order
+    const orderedGroups = [
+      ...customOrder.filter(wk => groups[wk]).map(wk => groups[wk]),
+      ...Object.entries(groups).filter(([wk]) => !customOrder.includes(wk)).map(([,g]) => g),
+    ]
+    return [...running, ...orderedGroups.flat()]
+  }
+
   async function forceSwitch(orderId: number, machineId: number) {
     const updated = orders.map(o => {
       if (o.id !== orderId) return o
@@ -1189,12 +1286,13 @@ export default function App() {
 
   // ── NAV ───────────────────────────────────────────────────
   const NAV: {id:View;icon:string;label:string}[] = [
-    {id:"dashboard", icon:"⊞", label:"Dashboard"},
-    {id:"orders",    icon:"≡", label:"Orders"},
-    {id:"machines",  icon:"⚙", label:"Machines"},
-    {id:"textiles",  icon:"🧵", label:"Textiles"},
-    {id:"analytics", icon:"↗", label:"Analytics"},
-    {id:"history",   icon:"🕓", label:"History"},
+    {id:"dashboard",   icon:"⊞", label:"Dashboard"},
+    {id:"orders",      icon:"≡", label:"Orders"},
+    {id:"machines",    icon:"⚙", label:"Machines"},
+    {id:"textiles",    icon:"🧵", label:"Textiles"},
+    {id:"analytics",   icon:"↗", label:"Analytics"},
+    {id:"history",     icon:"🕓", label:"History"},
+    {id:"suggestions", icon:"💡", label:"Suggestions"},
   ]
 
   return (
@@ -1290,16 +1388,28 @@ export default function App() {
             <div style={S.twoCol}>
               {/* schedule card */}
               <div style={S.card}>
-                <div style={S.cHead}><span style={S.cTitle}>Machine schedule</span><span style={S.cSub}>active warp + queue</span></div>
+                <div style={S.cHead}><span style={S.cTitle}>Machine schedule</span><span style={S.cSub}>active warp + queue · use arrows to reorder</span></div>
                 <div style={S.cBody}>
                   {machines.length===0 && <div style={S.empty}>No machines yet.</div>}
                   {machines.map(m=>{
-                    const q  = schedule[m.id]??[]
+                    const q  = getOrderedQueue(m.id)
                     const ld = machineLoad(schedule,m.id)
                     const st = m.outOfOrder ? "OUT OF ORDER" : machineStatus(ld,m.capacity)
                     const pc = loadPct(ld,m.capacity)
                     const dotBg = m.outOfOrder ? "#E24B4A" : statColor(st)
-                    const active = q[0]; const rest = q.slice(1)
+
+                    // build warp group blocks from ordered queue
+                    const running    = q.filter(o => o.warpStatus === "on-machine")
+                    const notStarted = q.filter(o => o.warpStatus !== "on-machine")
+
+                    // group notStarted into consecutive warp blocks
+                    const warpBlocks: Order[][] = []
+                    for (const o of notStarted) {
+                      const last = warpBlocks[warpBlocks.length - 1]
+                      if (last && warpKey(last[0]) === warpKey(o)) last.push(o)
+                      else warpBlocks.push([o])
+                    }
+
                     return (
                       <div key={m.id} style={{marginBottom:16,paddingBottom:16,borderBottom:"0.5px solid #f0f0f0",
                         opacity: m.outOfOrder ? 0.65 : 1}}>
@@ -1307,8 +1417,7 @@ export default function App() {
                           <div style={{width:8,height:8,borderRadius:"50%",background:dotBg,flexShrink:0}}/>
                           <span style={{fontSize:13,fontWeight:500,flex:1}}>{m.name}</span>
                           {m.outOfOrder
-                            ? <span style={{background:"#FEEBEB",color:"#E24B4A",borderRadius:4,
-                                padding:"1px 7px",fontSize:11,fontWeight:600}}>OUT OF ORDER</span>
+                            ? <span style={{background:"#FEEBEB",color:"#E24B4A",borderRadius:4,padding:"1px 7px",fontSize:11,fontWeight:600}}>OUT OF ORDER</span>
                             : <Badge text={`${ld}m / ${m.capacity}m`} color={statColor(st)}/>
                           }
                         </div>
@@ -1320,59 +1429,80 @@ export default function App() {
                         )}
                         {q.length===0
                           ? <div style={{fontSize:12,color:"#bbb",paddingTop:4}}>No orders assigned</div>
-                          : <>
-                            {active&&(
-                              <div style={{...S.activeWarp,
-                                borderColor: active.warpClosed ? "#639922" : "#7F77DD",
-                                background: active.warpClosed ? "#EDFBEE" : "transparent"}}>
+                          : <div style={{marginTop:6}}>
+                            {/* running warp blocks */}
+                            {running.map(o=>(
+                              <div key={o.id} style={{...S.activeWarp,
+                                borderColor:"#639922",background:"#EDFBEE",marginBottom:4}}>
                                 <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
                                   <div style={{flex:1}}>
-                                    <div style={{...S.activeLabel,
-                                      color: active.warpClosed ? "#166534" : "#7F77DD"}}>
-                                      {active.warpClosed ? "🔒 Running on machine" : "Active warp"}
-                                    </div>
-                                    <div style={{fontSize:13,fontWeight:500}}>{active.textile}</div>
-                                    <div style={{fontSize:11,color:"#888"}}>{active.fabricType} · {active.color} · {active.quantity}m</div>
-                                    {active.forcedMachineId&&(
-                                      <div style={{fontSize:10,color:"#7F77DD",marginTop:2}}>
-                                        ⚡ Force-assigned
-                                        <button onClick={()=>clearForce(active.id)}
-                                          style={{...S.btnIcon,fontSize:10,color:"#aaa",marginLeft:4}}>
-                                          (clear)
-                                        </button>
-                                      </div>
-                                    )}
+                                    <div style={{...S.activeLabel,color:"#166534"}}>🔒 Running on machine</div>
+                                    <div style={{fontSize:13,fontWeight:500}}>{o.textile}</div>
+                                    <div style={{fontSize:11,color:"#888"}}>{o.fabricType} · {o.color} · {o.quantity}m</div>
                                   </div>
-                                  {!active.warpClosed && (
-                                    <button
-                                      onClick={()=>setForceSwitchOrder(active)}
-                                      style={{...S.btnSm,fontSize:10,padding:"3px 8px",color:"#7F77DD",
-                                        border:"0.5px solid #7F77DD",background:"#F3F2FD",flexShrink:0}}>
-                                      ⚡ Switch machine
-                                    </button>
-                                  )}
                                 </div>
-                              </div>
-                            )}
-                            {rest.map((o,i)=>(
-                              <div key={o.id} style={{...S.qItem,justifyContent:"space-between"}}>
-                                <div style={{display:"flex",alignItems:"center",gap:6,flex:1}}>
-                                  <span style={S.qNum}>{i+2}</span>
-                                  <span>
-                                    {o.textile} — {o.fabricType} · {o.color} · {o.quantity}m
-                                    {active&&warpKey(o)===warpKey(active)&&<span style={{...S.sameWarp,marginLeft:4}}>same warp</span>}
-                                    {o.forcedMachineId&&<span style={{...S.sameWarp,marginLeft:4,background:"#F3F2FD",color:"#7F77DD"}}>⚡ forced</span>}
-                                  </span>
-                                </div>
-                                <button
-                                  onClick={()=>setForceSwitchOrder(o)}
-                                  style={{...S.btnSm,fontSize:10,padding:"2px 6px",color:"#7F77DD",
-                                    border:"0.5px solid #c4c0f0",background:"#F3F2FD",flexShrink:0,marginLeft:6}}>
-                                  ⚡
-                                </button>
                               </div>
                             ))}
-                          </>
+                            {/* pending warp group blocks with reorder arrows */}
+                            {warpBlocks.map((block, bi)=>{
+                              const wk = warpKey(block[0])
+                              const totalM = block.reduce((s,o)=>s+o.quantity,0)
+                              const topPri = block.reduce((best,o) => PRI[o.priority]>PRI[best.priority]?o:best, block[0]).priority
+                              return (
+                                <div key={wk+bi} style={{
+                                  border:"0.5px solid #e5e5e5",borderRadius:8,
+                                  marginBottom:6,overflow:"hidden",
+                                  borderLeft: bi===0 ? "3px solid #7F77DD" : "3px solid #e0e0e0",
+                                }}>
+                                  {/* warp group header */}
+                                  <div style={{display:"flex",alignItems:"center",gap:8,
+                                    padding:"6px 10px",background:bi===0?"#F8F7FF":"#fafafa"}}>
+                                    <div style={{flex:1}}>
+                                      <span style={{fontSize:12,fontWeight:600,color:bi===0?"#534AB7":"#555"}}>
+                                        {bi===0?"▶ ":""}{block[0].fabricType} · {block[0].color}
+                                      </span>
+                                      <span style={{fontSize:11,color:"#aaa",marginLeft:8}}>
+                                        {block.length} order{block.length>1?"s":""} · {totalM}m
+                                      </span>
+                                      <Badge text={topPri} color={priColor(topPri)}/>
+                                    </div>
+                                    {/* reorder arrows */}
+                                    <div style={{display:"flex",gap:2}}>
+                                      <button
+                                        onClick={()=>moveWarpGroup(m.id, wk, "up")}
+                                        disabled={bi===0}
+                                        style={{...S.btnIcon,fontSize:12,opacity:bi===0?0.3:1,padding:"2px 5px",
+                                          border:"0.5px solid #e0e0e0",borderRadius:4}}
+                                        title="Move warp group earlier">▲</button>
+                                      <button
+                                        onClick={()=>moveWarpGroup(m.id, wk, "down")}
+                                        disabled={bi===warpBlocks.length-1}
+                                        style={{...S.btnIcon,fontSize:12,opacity:bi===warpBlocks.length-1?0.3:1,padding:"2px 5px",
+                                          border:"0.5px solid #e0e0e0",borderRadius:4}}
+                                        title="Move warp group later">▼</button>
+                                    </div>
+                                  </div>
+                                  {/* orders in this warp block */}
+                                  {block.map((o,oi)=>(
+                                    <div key={o.id} style={{...S.qItem,
+                                      margin:0,borderRadius:0,borderBottom:"0.5px solid #f0f0f0",
+                                      background:bi===0&&oi===0?"#F8F7FF":"transparent"}}>
+                                      <span style={S.qNum}>{running.length + warpBlocks.slice(0,bi).reduce((s,b)=>s+b.length,0) + oi + 1}</span>
+                                      <span style={{flex:1,fontSize:12}}>
+                                        {o.textile} · {o.quantity}m
+                                        {o.orderNumber&&<span style={{color:"#aaa",marginLeft:6}}>#{o.orderNumber}</span>}
+                                        {o.forcedMachineId&&<span style={{...S.sameWarp,marginLeft:4,background:"#F3F2FD",color:"#7F77DD"}}>⚡</span>}
+                                      </span>
+                                      <Badge text={o.priority} color={priColor(o.priority)}/>
+                                      <button onClick={()=>setForceSwitchOrder(o)}
+                                        style={{...S.btnSm,fontSize:10,padding:"2px 6px",color:"#7F77DD",
+                                          border:"0.5px solid #c4c0f0",background:"#F3F2FD",marginLeft:4}}>⚡</button>
+                                    </div>
+                                  ))}
+                                </div>
+                              )
+                            })}
+                          </div>
                         }
                       </div>
                     )
@@ -1724,6 +1854,220 @@ export default function App() {
                   })}
                 </div>
               </div>
+            </div>
+          )
+        })()}
+
+        {/* ── SUGGESTIONS VIEW ──────────────────────────── */}
+        {view==="suggestions" && (()=>{
+
+          // ── ANALYSIS ENGINE ─────────────────────────────────
+          type Suggestion = {
+            id: string
+            type: "move-to-free-machine" | "merge-warps" | "split-overloaded"
+            title: string
+            detail: string
+            impact: string
+            affectedOrderIds: number[]
+            targetMachineId?: number
+            severity: "high" | "medium" | "low"
+          }
+
+          const suggestions: Suggestion[] = []
+          const activeOrders = orders.filter(o => o.warpStatus === "not-started")
+
+          // ── ANALYSIS 1: overloaded machine has flexible orders
+          // Find orders on overloaded machines that can run on another machine with capacity
+          for (const m of machines) {
+            const ld = machineLoad(schedule, m.id)
+            const cap = m.capacity ?? DEFAULT_CAP
+            if (ld <= cap) continue   // not overloaded
+
+            const machineOrders = (schedule[m.id] ?? []).filter(o => o.warpStatus === "not-started")
+            for (const o of machineOrders) {
+              if (o.machineCategories.length < 2) continue   // can't move — only fits this machine
+              // find a compatible machine with available capacity
+              const alternatives = machines.filter(alt =>
+                alt.id !== m.id &&
+                !alt.outOfOrder &&
+                o.machineCategories.includes(alt.category) &&
+                machineLoad(schedule, alt.id) + o.quantity <= (alt.capacity ?? DEFAULT_CAP)
+              )
+              if (!alternatives.length) continue
+              // pick best alternative — same warp bonus or least loaded
+              const best = alternatives.reduce((b, alt) => {
+                const altQ = schedule[alt.id] ?? []
+                const sameWarp = altQ.some(x => warpKey(x) === warpKey(o))
+                const bQ = schedule[b.id] ?? []
+                const bSameWarp = bQ.some(x => warpKey(x) === warpKey(o))
+                if (sameWarp && !bSameWarp) return alt
+                if (!sameWarp && bSameWarp) return b
+                return machineLoad(schedule,alt.id) < machineLoad(schedule,b.id) ? alt : b
+              })
+              const altQ = schedule[best.id] ?? []
+              const sameWarp = altQ.some(x => warpKey(x) === warpKey(o))
+              suggestions.push({
+                id: `move-${o.id}`,
+                type: "move-to-free-machine",
+                title: `Move "${o.textile}" off overloaded ${m.name}`,
+                detail: `This order (${o.quantity}m · ${o.fabricType} · ${o.color}) is on ${m.name} which is at ${Math.round(ld/cap*100)}% capacity. It can also run on ${best.name} which has room.${sameWarp ? " ✦ Same warp already on "+best.name+" — no changeover needed." : ""}`,
+                impact: `Frees ${o.quantity}m from ${m.name} · ${sameWarp ? "zero extra changeover" : "one new changeover on "+best.name}`,
+                affectedOrderIds: [o.id],
+                targetMachineId: best.id,
+                severity: ld/cap > 1.3 ? "high" : "medium",
+              })
+            }
+          }
+
+          // ── ANALYSIS 2: same warp split across two machines
+          // Orders with same fabric+color are on different machines — could be merged
+          const warpMachineMap: Record<string, Set<number>> = {}
+          for (const m of machines) {
+            for (const o of (schedule[m.id] ?? []).filter(o => o.warpStatus === "not-started")) {
+              const wk = warpKey(o)
+              if (!warpMachineMap[wk]) warpMachineMap[wk] = new Set()
+              warpMachineMap[wk].add(m.id)
+            }
+          }
+          for (const [wk, machineIds] of Object.entries(warpMachineMap)) {
+            if (machineIds.size < 2) continue
+            const mIds = [...machineIds]
+            // find the machine with more of this warp — that's the "primary"
+            const primary = mIds.reduce((a, b) =>
+              (schedule[a]??[]).filter(o=>warpKey(o)===wk).reduce((s,o)=>s+o.quantity,0) >
+              (schedule[b]??[]).filter(o=>warpKey(o)===wk).reduce((s,o)=>s+o.quantity,0) ? a : b
+            )
+            const secondary = mIds.filter(id=>id!==primary)
+            for (const secId of secondary) {
+              const movableOrders = (schedule[secId]??[]).filter(o =>
+                warpKey(o)===wk && o.warpStatus==="not-started" && o.machineCategories.length > 1
+              )
+              if (!movableOrders.length) continue
+              const primM = machines.find(m=>m.id===primary)
+              const secM  = machines.find(m=>m.id===secId)
+              if (!primM || !secM) continue
+              const totalMoving = movableOrders.reduce((s,o)=>s+o.quantity,0)
+              const primLoad = machineLoad(schedule, primary)
+              const primCap  = primM.capacity ?? DEFAULT_CAP
+              if (primLoad + totalMoving > primCap * 1.1) continue  // would overload primary
+              suggestions.push({
+                id: `merge-${wk}-${secId}`,
+                type: "merge-warps",
+                title: `Merge ${wk.replace("||","·")} warp onto one machine`,
+                detail: `This warp (${wk.replace("||"," · ")}) is split across ${primM.name} and ${secM.name}. Consolidating onto ${primM.name} saves ${movableOrders.length} changeover${movableOrders.length>1?"s":""}. Total: ${totalMoving}m moving.`,
+                impact: `Eliminates ${movableOrders.length} changeover${movableOrders.length>1?"s":""} · saves warp setup time`,
+                affectedOrderIds: movableOrders.map(o=>o.id),
+                targetMachineId: primary,
+                severity: movableOrders.length > 2 ? "high" : "medium",
+              })
+            }
+          }
+
+          // ── ANALYSIS 3: deadline urgency — high priority order queued late
+          for (const m of machines) {
+            const q = getOrderedQueue(m.id).filter(o => o.warpStatus === "not-started")
+            for (let i = 1; i < q.length; i++) {
+              const o = q[i]
+              if (!o.deadline || o.priority !== "High") continue
+              const diff = (new Date(o.deadline).getTime() - Date.now()) / 86400000
+              if (diff > 5) continue
+              const ahead = q.slice(0, i)
+              const aheadLow = ahead.filter(x => x.priority === "Low" || x.priority === "Normal")
+              if (!aheadLow.length) continue
+              suggestions.push({
+                id: `urgent-${o.id}`,
+                type: "split-overloaded",
+                title: `Urgent order "${o.textile}" is queued behind lower-priority work`,
+                detail: `"${o.textile}" (High priority, due in ${Math.round(diff)} days) is position ${i+1} in ${m.name}'s queue. There are ${aheadLow.length} lower-priority order${aheadLow.length>1?"s":""} ahead of it.`,
+                impact: `Reorder queue to run urgent order first`,
+                affectedOrderIds: [o.id],
+                targetMachineId: m.id,
+                severity: diff < 2 ? "high" : "medium",
+              })
+            }
+          }
+
+          const sorted = suggestions
+            .filter(sg => !dismissedSuggestions.has(sg.id))
+            .sort((a,b) =>
+              (a.severity==="high"?0:a.severity==="medium"?1:2) -
+              (b.severity==="high"?0:b.severity==="medium"?1:2)
+            )
+
+          return (
+            <div style={S.viewPad}>
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:18,fontWeight:600,marginBottom:4}}>💡 Smart Suggestions</div>
+                <div style={{fontSize:13,color:"#888"}}>
+                  Analysis of your current schedule. Each suggestion can be accepted or declined — accepting changes the production plan, declining dismisses it.
+                  <strong style={{color:"#534AB7"}}> Your dashboard is never changed until you accept.</strong>
+                </div>
+              </div>
+
+              {sorted.length===0 && (
+                <div style={{...S.card,padding:40,textAlign:"center"}}>
+                  <div style={{fontSize:32,marginBottom:12}}>✅</div>
+                  <div style={{fontWeight:500,marginBottom:6}}>Your schedule looks optimal</div>
+                  <div style={{fontSize:13,color:"#aaa"}}>No issues found. Add more orders or machines to get suggestions.</div>
+                </div>
+              )}
+
+              {sorted.map(sg=>(
+                <div key={sg.id} style={{...S.card,marginBottom:12,borderLeft:`3px solid ${
+                  sg.severity==="high"?"#E24B4A":sg.severity==="medium"?"#EF9F27":"#639922"
+                }`}}>
+                  <div style={S.cBody}>
+                    <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
+                      <div style={{
+                        width:32,height:32,borderRadius:8,flexShrink:0,
+                        background:sg.severity==="high"?"#FEEBEB":sg.severity==="medium"?"#FEF3C7":"#EDFBEE",
+                        display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,
+                      }}>
+                        {sg.type==="move-to-free-machine"?"🔀":sg.type==="merge-warps"?"🧵":"⚡"}
+                      </div>
+                      <div style={{flex:1}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                          <span style={{fontSize:14,fontWeight:600}}>{sg.title}</span>
+                          <span style={{
+                            fontSize:10,fontWeight:600,padding:"1px 7px",borderRadius:20,
+                            background:sg.severity==="high"?"#FEEBEB":sg.severity==="medium"?"#FEF3C7":"#EDFBEE",
+                            color:sg.severity==="high"?"#A32D2D":sg.severity==="medium"?"#92400E":"#166534",
+                          }}>{sg.severity.toUpperCase()}</span>
+                        </div>
+                        <div style={{fontSize:13,color:"#555",marginBottom:6,lineHeight:1.5}}>{sg.detail}</div>
+                        <div style={{fontSize:12,color:"#7F77DD",fontWeight:500,marginBottom:12}}>
+                          📈 Impact: {sg.impact}
+                        </div>
+                        <div style={{display:"flex",gap:8}}>
+                          <button
+                            style={{...S.btnPrimary,fontSize:12,padding:"6px 16px"}}
+                            onClick={async ()=>{
+                              if (sg.type==="move-to-free-machine" && sg.targetMachineId) {
+                                for (const oid of sg.affectedOrderIds) {
+                                  await forceSwitch(oid, sg.targetMachineId)
+                                }
+                              } else if (sg.type==="merge-warps" && sg.targetMachineId) {
+                                for (const oid of sg.affectedOrderIds) {
+                                  await forceSwitch(oid, sg.targetMachineId)
+                                }
+                              } else if (sg.type==="split-overloaded" && sg.targetMachineId) {
+                                // move urgent order to front by clearing its force and bumping warp order
+                                const o = orders.find(x=>x.id===sg.affectedOrderIds[0])
+                                if (o) moveWarpGroup(sg.targetMachineId, warpKey(o), "up")
+                              }
+                            }}>
+                            ✓ Accept
+                          </button>
+                          <button style={{...S.btnSm,fontSize:12,padding:"6px 16px"}}
+                            onClick={()=>setDismissedSuggestions(p=>new Set([...p,sg.id]))}>
+                            ✕ Dismiss
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           )
         })()}
