@@ -909,18 +909,18 @@ export default function App() {
   // machine actions
   function resetMF() { setMName(""); setMCat("Electronic Double"); setMCap(String(DEFAULT_CAP)) }
 
-  function saveMachine() {
+  async function saveMachine() {
     if (!mName.trim()) return
     const cap = Number(mCap) || DEFAULT_CAP
     if (editM) {
       const updated = { ...editM, name:mName, category:mCat, capacity:cap }
       setMachines(p => p.map(m => m.id===editM.id ? updated : m))
-      dbUpsert("machines", updated as unknown as Record<string, unknown>)
+      await dbUpsert("machines", updated as unknown as Record<string, unknown>)
       setEditM(null)
     } else {
       const created: Machine = { id:Date.now(), name:mName, category:mCat, capacity:cap }
       setMachines(p => [...p, created])
-      dbUpsert("machines", created as unknown as Record<string, unknown>)
+      await dbUpsert("machines", created as unknown as Record<string, unknown>)
       setShowMM(false)
     }
     resetMF()
@@ -933,19 +933,19 @@ export default function App() {
   // textile actions
   function resetTF() { setTName(""); setTColor(""); setTFab(""); setTCats([]); setTNotes("") }
 
-  function saveTextile() {
+  async function saveTextile() {
     if (!tName.trim() || !tFab.trim() || tCats.length === 0) return
     if (editT) {
       const updated = { ...editT, name:tName, color:tColor, fabricType:tFab,
         machineCategories:tCats, notes:tNotes }
       setTextiles(p => p.map(t => t.id===editT.id ? updated : t))
-      dbUpsert("textiles", updated as unknown as Record<string, unknown>)
+      await dbUpsert("textiles", updated as unknown as Record<string, unknown>)
       setEditT(null)
     } else {
       const created: Textile = { id:Date.now(), name:tName, color:tColor,
         fabricType:tFab, machineCategories:tCats, notes:tNotes }
       setTextiles(p => [...p, created])
-      dbUpsert("textiles", created as unknown as Record<string, unknown>)
+      await dbUpsert("textiles", created as unknown as Record<string, unknown>)
       setShowTM(false)
     }
     resetTF()
@@ -956,9 +956,9 @@ export default function App() {
     setTCats(t.machineCategories); setTNotes(t.notes); setEditT(t)
   }
 
-  function delTextile(id: number) {
+  async function delTextile(id: number) {
     setTextiles(p => p.filter(t => t.id!==id))
-    dbDelete("textiles", id)
+    await dbDelete("textiles", id)
   }
 
   // order actions
@@ -968,7 +968,7 @@ export default function App() {
     setODl(""); setOPri("Normal"); setOCats([]); setONotes(""); setOOrderNum("")
   }
 
-  function saveOrder() {
+  async function saveOrder() {
     if (!oTextile.trim() || !oQty || oCats.length === 0) return
     const data: Order = {
       id: editO ? editO.id : Date.now(),
@@ -984,7 +984,7 @@ export default function App() {
       setOrders(p => [...p, data])
       setShowOM(false)
     }
-    dbUpsert("orders", data as unknown as Record<string, unknown>)
+    await dbUpsert("orders", data as unknown as Record<string, unknown>)
 
     // auto-save to textile DB if manually entered and not already there
     if (oSelId === null && oTextile.trim() && oFabric.trim() && oCats.length > 0) {
@@ -1000,7 +1000,7 @@ export default function App() {
           machineCategories:oCats, notes:oNotes,
         }
         setTextiles(p => [...p, newT])
-        dbUpsert("textiles", newT as unknown as Record<string, unknown>)
+        await dbUpsert("textiles", newT as unknown as Record<string, unknown>)
       }
     }
     resetOF()
@@ -1014,22 +1014,22 @@ export default function App() {
     setOOrderNum(o.orderNumber ?? ""); setEditO(o)
   }
 
-  function delOrder(id: number) {
+  async function delOrder(id: number) {
     setOrders(p => p.filter(o => o.id!==id))
-    dbDelete("orders", id)
+    await dbDelete("orders", id)
   }
-  function delMachine(id: number) {
+  async function delMachine(id: number) {
     setMachines(p => p.filter(m => m.id!==id))
-    dbDelete("machines", id)
+    await dbDelete("machines", id)
   }
 
   // ── FEATURE 1: toggle machine out-of-order
   // not-started orders re-optimize automatically (scheduler excludes OOO machines)
   // on-machine orders stay (can't move mid-run) but show a warning
-  function toggleOutOfOrder(m: Machine) {
+  async function toggleOutOfOrder(m: Machine) {
     const updated = { ...m, outOfOrder: !m.outOfOrder }
     setMachines(p => p.map(x => x.id===m.id ? updated : x))
-    dbUpsert("machines", updated as unknown as Record<string, unknown>)
+    await dbUpsert("machines", updated as unknown as Record<string, unknown>)
   }
 
   // ── "Warp done, start next"
@@ -1037,54 +1037,57 @@ export default function App() {
   // The scheduler's sealedSlots logic blocks any new order from getting
   // a same-warp bonus on this machine for this fabric+color.
   // New orders with the same specs will be treated as a fresh separate warp.
-  function warpNextRun(orderIds: number[]) {
-    setOrders(p => p.map(o => {
+  async function warpNextRun(orderIds: number[]) {
+    const updated = orders.map(o => {
       if (!orderIds.includes(o.id)) return o
-      const updated: Order = { ...o, warpStatus: "on-machine", warpClosed: true }
-      dbUpsert("orders", updated as unknown as Record<string, unknown>)
-      return updated
-    }))
+      return { ...o, warpStatus: "on-machine" as WarpStatus, warpClosed: true }
+    })
+    setOrders(updated)
+    for (const o of updated.filter(o => orderIds.includes(o.id))) {
+      await dbUpsert("orders", o as unknown as Record<string, unknown>)
+    }
   }
 
-  // ── "All orders done"
-  // All orders fully woven — move to history.
-  // Preserve warpGroupId so history can show them grouped correctly.
-  function warpGroupDone(orderIds: number[]) {
-    setOrders(p => p.map(o => {
+  async function warpGroupDone(orderIds: number[]) {
+    const updated = orders.map(o => {
       if (!orderIds.includes(o.id)) return o
-      const updated: Order = { ...o, warpStatus: "done", warpClosed: true }
-      dbUpsert("orders", updated as unknown as Record<string, unknown>)
-      return updated
-    }))
+      return { ...o, warpStatus: "done" as WarpStatus, warpClosed: true }
+    })
+    setOrders(updated)
+    for (const o of updated.filter(o => orderIds.includes(o.id))) {
+      await dbUpsert("orders", o as unknown as Record<string, unknown>)
+    }
   }
 
-  // ── FEATURE 3: force an order to a specific machine
-  function forceSwitch(orderId: number, machineId: number) {
-    setOrders(p => p.map(o => {
+  async function forceSwitch(orderId: number, machineId: number) {
+    const updated = orders.map(o => {
       if (o.id !== orderId) return o
-      const updated = { ...o, forcedMachineId: machineId, warpStatus: "not-started" as WarpStatus }
-      dbUpsert("orders", updated as unknown as Record<string, unknown>)
-      return updated
-    }))
+      return { ...o, forcedMachineId: machineId, warpStatus: "not-started" as WarpStatus }
+    })
+    setOrders(updated)
+    const changed = updated.find(o => o.id === orderId)
+    if (changed) await dbUpsert("orders", changed as unknown as Record<string, unknown>)
     setForceSwitchOrder(null)
   }
 
-  // clear a force switch (let optimizer decide again)
-  function clearForce(orderId: number) {
-    setOrders(p => p.map(o => {
+  async function clearForce(orderId: number) {
+    const updated = orders.map(o => {
       if (o.id !== orderId) return o
-      const updated = { ...o, forcedMachineId: undefined }
-      dbUpsert("orders", updated as unknown as Record<string, unknown>)
-      return updated
-    }))
+      return { ...o, forcedMachineId: undefined }
+    })
+    setOrders(updated)
+    const changed = updated.find(o => o.id === orderId)
+    if (changed) await dbUpsert("orders", changed as unknown as Record<string, unknown>)
   }
-  function setWarpSt(id: number, st: WarpStatus) {
-    setOrders(p => p.map(o => {
+
+  async function setWarpSt(id: number, st: WarpStatus) {
+    const updated = orders.map(o => {
       if (o.id !== id) return o
-      const updated = { ...o, warpStatus: st }
-      dbUpsert("orders", updated as unknown as Record<string, unknown>)
-      return updated
-    }))
+      return { ...o, warpStatus: st }
+    })
+    setOrders(updated)
+    const changed = updated.find(o => o.id === id)
+    if (changed) await dbUpsert("orders", changed as unknown as Record<string, unknown>)
   }
 
   function exportCSV() {
@@ -1710,7 +1713,7 @@ export default function App() {
                             onClick={()=>{
                               const restored = {...o, warpStatus:"not-started" as WarpStatus}
                               setOrders(p=>p.map(x=>x.id===o.id?restored:x))
-                              dbUpsert("orders", restored as unknown as Record<string,unknown>)
+                              await dbUpsert("orders", restored as unknown as Record<string,unknown>)
                             }}
                             style={{...S.btnSm,fontSize:10,padding:"2px 8px",marginTop:2,color:"#888"}}>
                             ↩ Restore
