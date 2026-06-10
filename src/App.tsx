@@ -1710,7 +1710,7 @@ export default function App() {
                           <Badge text={o.priority} color={priColor(o.priority)}/>
                           {/* restore button — move back to active if marked done by mistake */}
                           <button
-                            onClick={()=>{
+                            onClick={async ()=>{
                               const restored = {...o, warpStatus:"not-started" as WarpStatus}
                               setOrders(p=>p.map(x=>x.id===o.id?restored:x))
                               await dbUpsert("orders", restored as unknown as Record<string,unknown>)
