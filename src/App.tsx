@@ -299,8 +299,8 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
       const pb = Math.max(...gb.map(o => PRI[o.priority]))
       if (pa !== pb) return pb - pa
       const da = ga.map(o => o.deadline).filter(Boolean).sort()[0] ?? "9999"
-      const db2 = gb.map(o => o.deadline).filter(Boolean).sort()[0] ?? "9999"
-      return da.localeCompare(db2)
+      const deadlineB = gb.map(o => o.deadline).filter(Boolean).sort()[0] ?? "9999"
+      return da.localeCompare(deadlineB)
     })
 
     map[m.id] = [...running, ...sortedGroups.flat()]
@@ -1110,10 +1110,6 @@ export default function App() {
   // Move a warp group up or down in a machine's queue
   function moveWarpGroup(machineId: number, wk: string, dir: "up" | "down") {
     const q = schedule[machineId] ?? []
-    // get unique warp keys in current order (excluding on-machine which are locked at top)
-    const runningKeys = [...new Set(
-      q.filter(o => o.warpStatus === "on-machine").map(o => warpKey(o))
-    )]
     const pendingKeys = [...new Set(
       q.filter(o => o.warpStatus !== "on-machine").map(o => warpKey(o))
     )]
@@ -1874,7 +1870,6 @@ export default function App() {
           }
 
           const suggestions: Suggestion[] = []
-          const activeOrders = orders.filter(o => o.warpStatus === "not-started")
 
           // ── ANALYSIS 1: overloaded machine has flexible orders
           // Find orders on overloaded machines that can run on another machine with capacity
