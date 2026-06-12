@@ -762,6 +762,9 @@ export default function App() {
   const [historySearch, setHistorySearch] = useState("")
   const [warpOrder, setWarpOrder] = useState<WarpOrder>({})
   const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(new Set())
+  const [orderSort,   setOrderSort]   = useState<"name" | "deadline">("name")
+  const [textileSearch, setTextileSearch] = useState("")
+  const [textileSort,   setTextileSort]   = useState<"name" | "fabricType">("name")
 
   // ── SUPABASE: initial load + real-time sync ───────────────
   const subscribed = useRef(false)
@@ -898,16 +901,43 @@ export default function App() {
   }, [orders, machines, ready])
 
   const filteredOrders = useMemo(() => {
-    // done orders go to History — active orders view shows only not-started and on-machine
     const active = orders.filter(o => o.warpStatus !== "done")
-    if (!search) return active
-    const q = search.toLowerCase()
-    return active.filter(o =>
-      o.textile.toLowerCase().includes(q) ||
-      o.color.toLowerCase().includes(q) ||
-      o.fabricType.toLowerCase().includes(q)
-    )
-  }, [orders, search])
+    const q = search.toLowerCase().trim()
+    const filtered = q
+      ? active.filter(o =>
+          o.textile.toLowerCase().includes(q) ||
+          o.color.toLowerCase().includes(q) ||
+          o.fabricType.toLowerCase().includes(q) ||
+          (o.orderNumber ?? "").toLowerCase().includes(q)
+        )
+      : active
+    return [...filtered].sort((a, b) => {
+      if (orderSort === "deadline") {
+        const da = a.deadline || "9999-99-99"
+        const db = b.deadline || "9999-99-99"
+        if (da !== db) return da.localeCompare(db)
+      }
+      return a.textile.localeCompare(b.textile, "ar")
+    })
+  }, [orders, search, orderSort])
+
+  const filteredTextiles = useMemo(() => {
+    const q = textileSearch.toLowerCase().trim()
+    const filtered = q
+      ? textiles.filter(t =>
+          t.name.toLowerCase().includes(q) ||
+          t.color.toLowerCase().includes(q) ||
+          t.fabricType.toLowerCase().includes(q)
+        )
+      : [...textiles]
+    return filtered.sort((a, b) => {
+      if (textileSort === "fabricType") {
+        const fc = a.fabricType.localeCompare(b.fabricType, "ar")
+        if (fc !== 0) return fc
+      }
+      return a.name.localeCompare(b.name, "ar")
+    })
+  }, [textiles, textileSearch, textileSort])
 
   // Warp groups: group by actual assigned machine + fabric + color.
   // Two orders with different machineCategories but same fabric/color
@@ -1567,13 +1597,36 @@ export default function App() {
             <div style={S.card}>
               <div style={S.cHead}>
                 <span style={S.cTitle}>Active orders</span>
-                <span style={S.cSub}>{filteredOrders.length} shown · done orders in History</span>
+                <span style={S.cSub}>{filteredOrders.length} shown · done in History</span>
+                {/* sort controls */}
+                <div style={{display:"flex",gap:6,marginLeft:"auto"}}>
+                  <button
+                    onClick={()=>setOrderSort("name")}
+                    style={{...S.btnSm,fontSize:11,padding:"3px 10px",
+                      background:orderSort==="name"?"#7F77DD":"transparent",
+                      color:orderSort==="name"?"#fff":"#888",
+                      border:orderSort==="name"?"none":"0.5px solid #d5d5d5"}}>
+                    A→Z
+                  </button>
+                  <button
+                    onClick={()=>setOrderSort("deadline")}
+                    style={{...S.btnSm,fontSize:11,padding:"3px 10px",
+                      background:orderSort==="deadline"?"#7F77DD":"transparent",
+                      color:orderSort==="deadline"?"#fff":"#888",
+                      border:orderSort==="deadline"?"none":"0.5px solid #d5d5d5"}}>
+                    📅 Deadline
+                  </button>
+                </div>
               </div>
+              {search && (
+                <div style={{padding:"6px 16px",fontSize:11,color:"#aaa",borderBottom:"0.5px solid #f5f5f5"}}>
+                  Searching name, color, fabric type, and order number
+                </div>
+              )}
               <div style={S.cBody}>
                 {filteredOrders.length===0&&<div style={S.empty}>No orders match your search.</div>}
                 {filteredOrders.map(o=>{
                   const warn  = dlWarn(o.deadline)
-                  // find which machine this order is currently assigned to via schedule
                   const assignedMachine = machines.find(m => (schedule[m.id]??[]).some(x => x.id === o.id))
                   return (
                     <div key={o.id} style={S.oRow}>
@@ -2073,12 +2126,42 @@ export default function App() {
             <div style={S.card}>
               <div style={S.cHead}>
                 <span style={S.cTitle}>Textile database</span>
-                <span style={S.cSub}>{textiles.length} saved</span>
+                <span style={S.cSub}>{filteredTextiles.length} / {textiles.length}</span>
+                {/* search */}
+                <div style={{position:"relative",display:"flex",alignItems:"center",margin:"0 8px"}}>
+                  <span style={{position:"absolute",left:9,fontSize:12,pointerEvents:"none",color:"#aaa"}}>🔍</span>
+                  <input
+                    style={{...S.search,width:160,marginBottom:0,paddingLeft:28,fontSize:12}}
+                    placeholder="Search textiles…"
+                    value={textileSearch}
+                    onChange={e=>setTextileSearch(e.target.value)}
+                    dir="auto"
+                  />
+                </div>
+                {/* sort */}
+                <div style={{display:"flex",gap:6}}>
+                  <button
+                    onClick={()=>setTextileSort("name")}
+                    style={{...S.btnSm,fontSize:11,padding:"3px 10px",
+                      background:textileSort==="name"?"#7F77DD":"transparent",
+                      color:textileSort==="name"?"#fff":"#888",
+                      border:textileSort==="name"?"none":"0.5px solid #d5d5d5"}}>
+                    A→Z name
+                  </button>
+                  <button
+                    onClick={()=>setTextileSort("fabricType")}
+                    style={{...S.btnSm,fontSize:11,padding:"3px 10px",
+                      background:textileSort==="fabricType"?"#7F77DD":"transparent",
+                      color:textileSort==="fabricType"?"#fff":"#888",
+                      border:textileSort==="fabricType"?"none":"0.5px solid #d5d5d5"}}>
+                    A→Z fabric
+                  </button>
+                </div>
                 <button style={S.btnSm} onClick={()=>{resetTF();setShowTM(true)}}>+ Add textile</button>
               </div>
               <div style={S.cBody}>
                 {textiles.length===0 && (
-                  <div style={{...S.empty, textAlign:"center", padding:"32px 0"}}>
+                  <div style={{...S.empty,textAlign:"center",padding:"32px 0"}}>
                     <div style={{fontSize:32,marginBottom:8}}>🧵</div>
                     <div style={{fontWeight:500,marginBottom:4}}>No textiles yet</div>
                     <div style={{fontSize:12,color:"#bbb",marginBottom:16}}>
@@ -2087,13 +2170,16 @@ export default function App() {
                     <button style={S.btnPrimary} onClick={()=>{resetTF();setShowTM(true)}}>Add first textile</button>
                   </div>
                 )}
-                {textiles.map(t=>(
+                {textiles.length>0 && filteredTextiles.length===0 && (
+                  <div style={S.empty}>No textiles match "{textileSearch}"</div>
+                )}
+                {filteredTextiles.map(t=>(
                   <div key={t.id} style={{display:"flex",alignItems:"flex-start",gap:12,padding:"12px 0",borderBottom:"0.5px solid #f5f5f5"}}>
                     <div style={{width:36,height:36,borderRadius:8,background:"#EEEDFE",display:"flex",
                       alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>🧵</div>
                     <div style={{flex:1}}>
-                      <div style={{fontSize:14,fontWeight:500}}>{t.name}</div>
-                      <div style={{fontSize:12,color:"#888",marginTop:2}}>{t.fabricType} · {t.color}</div>
+                      <div style={{fontSize:14,fontWeight:500,direction:"auto" as CSSProperties["direction"]}}>{t.name}</div>
+                      <div style={{fontSize:12,color:"#888",marginTop:2,direction:"auto" as CSSProperties["direction"]}}>{t.fabricType} · {t.color}</div>
                       <div style={{fontSize:11,color:"#aaa",marginTop:4,display:"flex",flexWrap:"wrap",gap:4}}>
                         {t.machineCategories.map(c=>(
                           <span key={c} style={{background:"#f0f0f0",borderRadius:4,padding:"1px 7px"}}>{c}</span>
