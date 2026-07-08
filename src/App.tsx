@@ -1410,7 +1410,135 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     }
   }
 
-  // ── DERIVED: must come BEFORE prop bundles that use them ──
+  // ── PRINT: generate a printable warp sheet for a warp group
+  function printWarpGroup(
+    label: string,
+    machine: string,
+    groupOrderIds: number[],
+    meters: number
+  ) {
+    // get the orders, sorted alphabetically by textile name
+    const groupOrders = orders
+      .filter(o => groupOrderIds.includes(o.id))
+      .sort((a, b) => a.textile.localeCompare(b.textile, "ar"))
+
+    const date = new Date().toLocaleDateString("en-GB")
+    const rows = groupOrders.map((o, i) => `
+      <tr>
+        <td>${i + 1}</td>
+        <td dir="auto">${o.textile}</td>
+        <td dir="auto">${o.color}</td>
+        <td dir="auto">${o.fabricType}</td>
+        <td>${o.quantity}m</td>
+        <td>${o.deadline || "—"}</td>
+        <td>${o.orderNumber ? "#" + o.orderNumber : "—"}</td>
+        <td>${o.priority}</td>
+      </tr>
+    `).join("")
+
+    const html = `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Warp Sheet — ${label}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', Arial, sans-serif; padding: 32px; color: #111; font-size: 13px; }
+    .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; border-bottom: 2px solid #111; padding-bottom: 16px; }
+    .brand { font-size: 22px; font-weight: 700; color: #534AB7; }
+    .meta { text-align: right; font-size: 12px; color: #555; line-height: 1.8; }
+    h2 { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+    .info { display: flex; gap: 32px; margin-bottom: 20px; }
+    .info-item { }
+    .info-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+    .info-val { font-size: 15px; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th { background: #534AB7; color: #fff; padding: 8px 10px; text-align: right; font-size: 12px; font-weight: 600; }
+    td { padding: 8px 10px; border-bottom: 0.5px solid #e5e5e5; vertical-align: top; }
+    tr:nth-child(even) td { background: #f9f9f9; }
+    .total { margin-top: 16px; text-align: left; font-size: 13px; font-weight: 600; }
+    .footer { margin-top: 40px; border-top: 0.5px solid #e5e5e5; padding-top: 12px; font-size: 11px; color: #aaa; display: flex; justify-content: space-between; }
+    .sig { margin-top: 48px; display: flex; justify-content: space-between; }
+    .sig-box { text-align: center; }
+    .sig-line { width: 140px; border-bottom: 1px solid #333; margin-bottom: 6px; height: 32px; }
+    .sig-label { font-size: 11px; color: #555; }
+    @media print { body { padding: 16px; } }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <div class="brand">Deebtex</div>
+      <div style="font-size:12px;color:#888;margin-top:4px">Warp Production Sheet</div>
+    </div>
+    <div class="meta">
+      <div>${date}</div>
+      <div>Machine: <strong>${machine}</strong></div>
+    </div>
+  </div>
+
+  <div class="info">
+    <div class="info-item">
+      <div class="info-label">Warp</div>
+      <div class="info-val" dir="auto">${label}</div>
+    </div>
+    <div class="info-item">
+      <div class="info-label">Total meters</div>
+      <div class="info-val">${meters}m</div>
+    </div>
+    <div class="info-item">
+      <div class="info-label">Orders</div>
+      <div class="info-val">${groupOrders.length}</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Textile</th>
+        <th>Color</th>
+        <th>Fabric type</th>
+        <th>Quantity</th>
+        <th>Deadline</th>
+        <th>Order no.</th>
+        <th>Priority</th>
+      </tr>
+    </thead>
+    <tbody>${rows}</tbody>
+  </table>
+
+  <div class="total">Total: ${meters}m across ${groupOrders.length} orders</div>
+
+  <div class="sig">
+    <div class="sig-box">
+      <div class="sig-line"></div>
+      <div class="sig-label">Prepared by</div>
+    </div>
+    <div class="sig-box">
+      <div class="sig-line"></div>
+      <div class="sig-label">Checked by</div>
+    </div>
+    <div class="sig-box">
+      <div class="sig-line"></div>
+      <div class="sig-label">Machine operator</div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span>Deebtex Factory Management</span>
+    <span>Printed: ${date}</span>
+  </div>
+</body>
+</html>`
+
+    const win = window.open("", "_blank")
+    if (!win) return
+    win.document.write(html)
+    win.document.close()
+    win.focus()
+    setTimeout(() => { win.print(); win.close() }, 400)
+  }
   const knownColors = useMemo(() => {
     const seen = new Set(textiles.map(t => t.color).filter(Boolean))
     return [...seen].sort((a, b) => a.localeCompare(b, "ar"))
@@ -1421,8 +1549,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     return [...seen].sort((a, b) => a.localeCompare(b, "ar"))
   }, [textiles])
 
-  const totalLoad = orders.reduce((s,o)=>s+o.quantity,0)
-  const highCnt   = orders.filter(o=>o.priority==="High").length
+  const totalLoad  = orders.filter(o => o.warpStatus !== "done").reduce((s,o)=>s+o.quantity,0)
+  const highCnt    = orders.filter(o => o.priority==="High" && o.warpStatus !== "done").length
+  const doneLoad   = orders.filter(o => o.warpStatus === "done").reduce((s,o)=>s+o.quantity,0)
+  const activeCount= orders.filter(o => o.warpStatus !== "done").length
 
   // ── PROP BUNDLES ──────────────────────────────────────────
   const orderFormProps: OFProps = {
@@ -1537,10 +1667,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           <div style={S.viewPad}>
             <div style={S.metrics}>
               {[
-                {label:"Total orders", val:orders.length,                  sub:`${highCnt} high priority`},
-                {label:"Total load",   val:`${totalLoad.toLocaleString()}m`,sub:`${machines.length} machines`},
-                {label:"Warp groups",  val:Object.keys(warpGroups).length,  sub:"changeover groups"},
-                {label:"Overloaded",   val:overloaded.length,
+                {label:"Active orders", val:activeCount,                    sub:`${highCnt} high priority`},
+                {label:"Remaining load",val:`${totalLoad.toLocaleString()}m`,sub:`${doneLoad.toLocaleString()}m produced`},
+                {label:"Warp groups",   val:Object.keys(warpGroups).length,  sub:"changeover groups"},
+                {label:"Overloaded",    val:overloaded.length,
                  sub:overloaded.length?overloaded.map(m=>m.name).join(", "):"all clear",
                  danger:overloaded.length>0},
               ].map(c=>(
@@ -1728,6 +1858,13 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                             background:"#EDFBEE",color:"#166534",border:"0.5px solid #86EFAC"}}
                           title="All orders in this warp are fully woven — move to history">
                           ✅ All orders done
+                        </button>
+                        <button
+                          onClick={()=>printWarpGroup(label, machine, orderIds, meters)}
+                          style={{...S.btnSm,fontSize:11,padding:"4px 10px",
+                            background:"#F3F2FD",color:"#534AB7",border:"0.5px solid #c4c0f0"}}
+                          title="Print warp sheet for the worker">
+                          🖨 Print sheet
                         </button>
                       </div>
                     </div>
