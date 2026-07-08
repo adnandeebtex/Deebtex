@@ -5,12 +5,153 @@
 import { useEffect, useMemo, useState, useRef } from "react"
 import type { CSSProperties } from "react"
 import { createClient } from "@supabase/supabase-js"
+import type { Session } from "@supabase/supabase-js"
 
 // ─── SUPABASE CLIENT ─────────────────────────────────────────
-// These values come from your .env file (see SETUP.md)
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string
 const db = createClient(SUPABASE_URL, SUPABASE_KEY)
+
+// ─── LOGIN SCREEN ─────────────────────────────────────────────
+function LoginScreen({ onLogin }: { onLogin: (s: Session) => void }) {
+  const [email,    setEmail]    = useState("")
+  const [password, setPassword] = useState("")
+  const [error,    setError]    = useState("")
+  const [loading,  setLoading]  = useState(false)
+
+  async function handleLogin() {
+    if (!email.trim() || !password.trim()) return
+    setLoading(true); setError("")
+    const { data, error: err } = await db.auth.signInWithPassword({ email, password })
+    setLoading(false)
+    if (err || !data.session) {
+      setError("Incorrect email or password.")
+    } else {
+      onLogin(data.session)
+    }
+  }
+
+  return (
+    <div style={{
+      display:"flex", alignItems:"center", justifyContent:"center",
+      height:"100vh", background:"#F7F6F3",
+      fontFamily:"'DM Sans','Segoe UI',system-ui,sans-serif",
+    }}>
+      <div style={{
+        background:"#fff", borderRadius:16, border:"0.5px solid #e5e5e5",
+        padding:40, width:360, boxShadow:"0 8px 32px rgba(0,0,0,0.08)",
+      }}>
+        {/* logo */}
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:32}}>
+          <div style={{
+            width:40,height:40,borderRadius:10,background:"#7F77DD",
+            display:"flex",alignItems:"center",justifyContent:"center",
+            color:"#EEEDFE",fontWeight:700,fontSize:16,
+          }}>Dt</div>
+          <div>
+            <div style={{fontWeight:600,fontSize:18}}>Deebtex</div>
+            <div style={{fontSize:12,color:"#aaa"}}>Factory management</div>
+          </div>
+        </div>
+
+        <div style={{marginBottom:16}}>
+          <label style={{display:"block",fontSize:12,fontWeight:500,color:"#555",marginBottom:6}}>
+            Email
+          </label>
+          <input
+            style={{
+              width:"100%",padding:"10px 12px",border:"0.5px solid #d5d5d5",
+              borderRadius:8,fontSize:14,outline:"none",boxSizing:"border-box" as const,
+              fontFamily:"inherit",
+            }}
+            type="email"
+            placeholder="your@email.com"
+            value={email}
+            onChange={e=>setEmail(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&handleLogin()}
+            autoFocus
+          />
+        </div>
+
+        <div style={{marginBottom:24}}>
+          <label style={{display:"block",fontSize:12,fontWeight:500,color:"#555",marginBottom:6}}>
+            Password
+          </label>
+          <input
+            style={{
+              width:"100%",padding:"10px 12px",border:"0.5px solid #d5d5d5",
+              borderRadius:8,fontSize:14,outline:"none",boxSizing:"border-box" as const,
+              fontFamily:"inherit",
+            }}
+            type="password"
+            placeholder="••••••••"
+            value={password}
+            onChange={e=>setPassword(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&handleLogin()}
+          />
+        </div>
+
+        {error && (
+          <div style={{
+            background:"#FEEBEB",color:"#A32D2D",borderRadius:8,
+            padding:"8px 12px",fontSize:13,marginBottom:16,
+          }}>
+            {error}
+          </div>
+        )}
+
+        <button
+          onClick={handleLogin}
+          disabled={loading}
+          style={{
+            width:"100%",padding:"11px",borderRadius:8,border:"none",
+            background: loading ? "#c4c0f0" : "#7F77DD",
+            color:"#EEEDFE",fontSize:14,fontWeight:600,cursor: loading ? "not-allowed" : "pointer",
+            fontFamily:"inherit",
+          }}>
+          {loading ? "Signing in…" : "Sign in"}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── ROOT: session gate ───────────────────────────────────────
+// This wraps the entire app. If no session → show login screen.
+// Once logged in → show the full app. Session persists across refreshes.
+export default function Root() {
+  const [session, setSession] = useState<Session | null | "loading">("loading")
+
+  useEffect(() => {
+    // check existing session on mount
+    db.auth.getSession().then(({ data }) => {
+      setSession(data.session ?? null)
+    })
+    // listen for auth state changes (login, logout, token refresh)
+    const { data: { subscription } } = db.auth.onAuthStateChange((_event, s) => {
+      setSession(s ?? null)
+    })
+    return () => subscription.unsubscribe()
+  }, [])
+
+  if (session === "loading") {
+    return (
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",
+        height:"100vh",background:"#F7F6F3",fontFamily:"sans-serif",color:"#aaa",fontSize:14}}>
+        Loading…
+      </div>
+    )
+  }
+
+  if (!session) {
+    return <LoginScreen onLogin={setSession}/>
+  }
+
+  return <App session={session} onLogout={async ()=>{
+    await db.auth.signOut()
+    setSession(null)
+  }}/>
+}
 
 // ─── TYPES ───────────────────────────────────────────────────
 type MachineCategory =
@@ -718,7 +859,7 @@ function TextileFormUI({ name,color,fabricType,categories,notes,isEdit,knownColo
     </>
   )
 }
-export default function App() {
+function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [machines,  setMachines]  = useState<Machine[]>([])
   const [orders,    setOrders]    = useState<Order[]>([])
   const [textiles,  setTextiles]  = useState<Textile[]>([])
@@ -1383,6 +1524,12 @@ export default function App() {
           <button style={S.btnSm} onClick={()=>{resetMF();setShowMM(true)}}>+ Machine</button>
           <button style={S.btnSm} onClick={()=>{resetTF();setShowTM(true)}}>+ Textile</button>
           <button style={S.btnPrimary} onClick={()=>{resetOF();setShowOM(true)}}>+ Add order</button>
+          <button
+            onClick={onLogout}
+            style={{...S.btnSm,color:"#E24B4A",border:"0.5px solid #fca5a5",marginLeft:4}}
+            title="Sign out">
+            ⎋ Sign out
+          </button>
         </div>
 
         {/* ── DASHBOARD VIEW ────────────────────────────── */}
