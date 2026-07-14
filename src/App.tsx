@@ -170,21 +170,25 @@ type Machine = {
   outOfOrder?: boolean   // true = machine is down, orders reassigned automatically
 }
 type Order   = {
-  id: number; textile: string; color: string; fabricType: string
+  id: number
+  textileCode: string    // e.g. "1138/01/01" — the code you type when adding an order
+  textileName: string    // e.g. "Montana" — auto-filled from textile DB when matched
+  color: string; fabricType: string
   quantity: number; deadline: string; priority: Priority
   machineCategories: MachineCategory[]
   warpStatus: WarpStatus; notes: string
-  orderNumber?: string   // branch reference e.g. "ORD-2024-001"
+  orderNumber?: string
   forcedMachineId?: number
   warpClosed?: boolean
   warpGroupId?: string
 }
-// A saved textile definition — the "database" entry
+// A saved textile definition
 type Textile = {
   id: number
-  name: string          // e.g. "Blue Gabardine"
-  color: string         // e.g. "Navy"
-  fabricType: string    // e.g. "Wool"
+  code: string           // e.g. "1138/01/01" — the unique identifier
+  name: string           // e.g. "Montana" — human-readable name
+  color: string
+  fabricType: string
   machineCategories: MachineCategory[]
   notes: string
 }
@@ -222,7 +226,9 @@ async function dbLoadRaw<T>(table: string): Promise<T[]> {
 function sanitizeOrder(row: Record<string, unknown>): Order {
   return {
     id:                Number(row.id),
-    textile:           String(row.textile ?? ""),
+    // support old rows that still have "textile" field — treat it as textileCode
+    textileCode:       String(row.textileCode ?? row.textile ?? ""),
+    textileName:       String(row.textileName ?? ""),
     color:             String(row.color ?? ""),
     fabricType:        String(row.fabricType ?? ""),
     quantity:          Number(row.quantity ?? 0),
@@ -578,13 +584,14 @@ function AutocompleteInput({ value, onChange, suggestions, placeholder }: ACProp
 type OFProps = {
   textiles: Textile[]
   selectedTextileId: number|null
-  textile:string; color:string; fabricType:string; quantity:string
+  textileCode:string; textileName:string; color:string; fabricType:string; quantity:string
   deadline:string; priority:Priority; categories:MachineCategory[]; notes:string
   orderNumber:string
   isEdit:boolean
   set: {
     selectedTextileId:(v:number|null)=>void
-    textile:(v:string)=>void; color:(v:string)=>void; fabricType:(v:string)=>void
+    textileCode:(v:string)=>void; textileName:(v:string)=>void
+    color:(v:string)=>void; fabricType:(v:string)=>void
     quantity:(v:string)=>void; deadline:(v:string)=>void; priority:(v:Priority)=>void
     categories:(v:MachineCategory[])=>void; notes:(v:string)=>void
     orderNumber:(v:string)=>void
@@ -592,7 +599,7 @@ type OFProps = {
   onSave:()=>void
 }
 
-function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quantity,deadline,priority,categories,notes,orderNumber,isEdit,set,onSave }: OFProps) {
+function OrderFormUI({ textiles,selectedTextileId,textileCode,textileName,color,fabricType,quantity,deadline,priority,categories,notes,orderNumber,isEdit,set,onSave }: OFProps) {
   const fromDB = selectedTextileId !== null
   const [txSearch, setTxSearch] = useState("")
   const [txOpen,   setTxOpen]   = useState(false)
@@ -601,6 +608,7 @@ function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quant
     if (!txSearch.trim()) return textiles
     const q = txSearch.toLowerCase()
     return textiles.filter(t =>
+      t.code.toLowerCase().includes(q) ||
       t.name.toLowerCase().includes(q) ||
       t.color.toLowerCase().includes(q) ||
       t.fabricType.toLowerCase().includes(q)
@@ -609,18 +617,19 @@ function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quant
 
   function pickTextile(t: Textile) {
     set.selectedTextileId(t.id)
-    set.textile(t.name)
+    set.textileCode(t.code)
+    set.textileName(t.name)
     set.color(t.color)
     set.fabricType(t.fabricType)
     set.categories(t.machineCategories)
     set.notes(t.notes)
-    setTxSearch("")
-    setTxOpen(false)
+    setTxSearch(""); setTxOpen(false)
   }
 
   function clearTextile() {
     set.selectedTextileId(null)
-    set.textile(""); set.color(""); set.fabricType("")
+    set.textileCode(""); set.textileName("")
+    set.color(""); set.fabricType("")
     set.categories([]); set.notes("")
     setTxSearch(""); setTxOpen(false)
   }
@@ -631,18 +640,18 @@ function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quant
       <Field label="Textile">
         {fromDB
           ? (
-            /* selected state — show chip with change button */
             <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 12px",
               border:"1.5px solid #7F77DD", borderRadius:8, background:"#F3F2FD" }}>
               <div style={{ flex:1 }}>
-                <div style={{ fontSize:13, fontWeight:500 }}>{textile}</div>
+                <div style={{ fontSize:13, fontWeight:500 }} dir="auto">
+                  {textileCode}{textileName ? ` — ${textileName}` : ""}
+                </div>
                 <div style={{ fontSize:11, color:"#888" }}>{fabricType} · {color}</div>
               </div>
               <button style={{ ...S.btnIcon, fontSize:12, color:"#7F77DD" }} onClick={clearTextile}>✕ change</button>
             </div>
           )
           : (
-            /* search + results */
             <div style={{ position:"relative" }}>
               <div style={{ position:"relative", display:"flex", alignItems:"center" }}>
                 <span style={{ position:"absolute", left:10, fontSize:13, color:"#aaa", pointerEvents:"none" }}>🔍</span>
@@ -661,8 +670,6 @@ function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quant
                     onClick={() => { setTxSearch(""); setTxOpen(false) }}>✕</button>
                 )}
               </div>
-
-              {/* dropdown results */}
               {txOpen && textiles.length > 0 && (
                 <div style={{ position:"absolute", top:"calc(100% + 4px)", left:0, right:0, zIndex:50,
                   background:"#fff", border:"0.5px solid #e0e0e0", borderRadius:8,
@@ -670,14 +677,15 @@ function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quant
                   {filteredTx.length === 0
                     ? <div style={{ padding:"12px 14px", fontSize:13, color:"#bbb" }}>No match — fill in manually below</div>
                     : filteredTx.map(t => (
-                        <div key={t.id}
-                          onClick={() => pickTextile(t)}
+                        <div key={t.id} onClick={() => pickTextile(t)}
                           style={{ padding:"9px 14px", cursor:"pointer", borderBottom:"0.5px solid #f5f5f5",
                             display:"flex", alignItems:"center", gap:10 }}
                           onMouseEnter={e => (e.currentTarget.style.background="#F3F2FD")}
                           onMouseLeave={e => (e.currentTarget.style.background="transparent")}>
                           <div style={{ flex:1 }}>
-                            <div style={{ fontSize:13, fontWeight:500 }}>{t.name}</div>
+                            <div style={{ fontSize:13, fontWeight:500 }} dir="auto">
+                              {t.code}{t.name ? ` — ${t.name}` : ""}
+                            </div>
                             <div style={{ fontSize:11, color:"#888" }}>{t.fabricType} · {t.color}</div>
                           </div>
                           <div style={{ fontSize:10, color:"#aaa" }}>
@@ -693,21 +701,24 @@ function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quant
         }
       </Field>
 
-      {/* manual fields — shown when no textile selected from DB */}
+      {/* manual fields */}
       {!fromDB && (
         <div style={{ background:"#fafafa", border:"0.5px solid #e5e5e5", borderRadius:8, padding:12, marginBottom:14 }}>
           <div style={{ fontSize:11, color:"#aaa", marginBottom:10 }}>
             Fill in manually — will be saved to your textile database automatically.
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
-            <Field label="Textile name">
-              <input style={S.input} value={textile} onChange={e=>set.textile(e.target.value)} placeholder="e.g. Blue Gabardine" />
+            <Field label="Textile code">
+              <input style={S.input} value={textileCode} onChange={e=>set.textileCode(e.target.value)} placeholder="e.g. 1138/01/01" dir="auto"/>
+            </Field>
+            <Field label="Textile name (optional)">
+              <input style={S.input} value={textileName} onChange={e=>set.textileName(e.target.value)} placeholder="e.g. Montana" dir="auto"/>
             </Field>
             <Field label="Color">
-              <input style={S.input} value={color} onChange={e=>set.color(e.target.value)} placeholder="e.g. Navy" />
+              <input style={S.input} value={color} onChange={e=>set.color(e.target.value)} placeholder="e.g. بيج" dir="auto"/>
             </Field>
             <Field label="Fabric type">
-              <input style={S.input} value={fabricType} onChange={e=>set.fabricType(e.target.value)} placeholder="e.g. Wool" />
+              <input style={S.input} value={fabricType} onChange={e=>set.fabricType(e.target.value)} placeholder="e.g. جاكار" dir="auto"/>
             </Field>
           </div>
           <Field label="Compatible machine types">
@@ -734,7 +745,6 @@ function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quant
         </div>
       )}
 
-      {/* always-shown fields */}
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
         <Field label="Quantity (m)">
           <input style={S.input} type="number" value={quantity} onChange={e=>set.quantity(e.target.value)} placeholder="500" />
@@ -748,8 +758,7 @@ function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quant
           </select>
         </Field>
         <Field label="Order number (optional)">
-          <input style={S.input} value={orderNumber} onChange={e=>set.orderNumber(e.target.value)}
-            placeholder="e.g. ORD-2024-001" dir="auto" />
+          <input style={S.input} value={orderNumber} onChange={e=>set.orderNumber(e.target.value)} placeholder="e.g. ORD-2024-001" dir="auto"/>
         </Field>
         <Field label="Notes (optional)">
           <input style={S.input} value={notes} onChange={e=>set.notes(e.target.value)} placeholder="Special instructions…" />
@@ -757,7 +766,7 @@ function OrderFormUI({ textiles,selectedTextileId,textile,color,fabricType,quant
       </div>
 
       {quantity&&<div style={S.warpPreview}>Warp needed: <strong>{calcWarp(Number(quantity))}m</strong> (qty × 1.1)</div>}
-      <button style={{...S.btnPrimary, opacity: (!textile.trim()||!quantity||categories.length===0)?0.5:1}}
+      <button style={{...S.btnPrimary, opacity:(!textileCode.trim()||!quantity||categories.length===0)?0.5:1}}
         onClick={onSave}>{isEdit?"Save changes":"Add order"}</button>
     </>
   )
@@ -791,43 +800,38 @@ function MachineFormUI({ name,category,capacity,isEdit,set,onSave }: MFProps) {
 
 // ─── TEXTILE FORM (top-level component) ──────────────────────
 type TFProps = {
-  name:string; color:string; fabricType:string
+  code:string; name:string; color:string; fabricType:string
   categories:MachineCategory[]; notes:string; isEdit:boolean
-  knownColors: string[]      // autocomplete suggestions for color
-  knownFabrics: string[]     // autocomplete suggestions for fabric type
+  knownColors: string[]
+  knownFabrics: string[]
   set: {
-    name:(v:string)=>void; color:(v:string)=>void; fabricType:(v:string)=>void
+    code:(v:string)=>void; name:(v:string)=>void
+    color:(v:string)=>void; fabricType:(v:string)=>void
     categories:(v:MachineCategory[])=>void; notes:(v:string)=>void
   }
   onSave:()=>void
 }
 
-function TextileFormUI({ name,color,fabricType,categories,notes,isEdit,knownColors,knownFabrics,set,onSave }: TFProps) {
+function TextileFormUI({ code,name,color,fabricType,categories,notes,isEdit,knownColors,knownFabrics,set,onSave }: TFProps) {
   function toggleCat(cat: MachineCategory) {
     set.categories(categories.includes(cat) ? categories.filter(c=>c!==cat) : [...categories,cat])
   }
   return (
     <>
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+        <Field label="Textile code">
+          <input style={S.input} value={code} onChange={e=>set.code(e.target.value)}
+            placeholder="e.g. 1138/01/01" dir="auto" />
+        </Field>
         <Field label="Textile name">
           <input style={S.input} value={name} onChange={e=>set.name(e.target.value)}
-            placeholder="e.g. جاكار بيج" dir="auto" />
+            placeholder="e.g. Montana" dir="auto" />
         </Field>
         <Field label="Color">
-          <AutocompleteInput
-            value={color}
-            onChange={set.color}
-            suggestions={knownColors}
-            placeholder="e.g. بيج"
-          />
+          <AutocompleteInput value={color} onChange={set.color} suggestions={knownColors} placeholder="e.g. بيج"/>
         </Field>
         <Field label="Fabric type">
-          <AutocompleteInput
-            value={fabricType}
-            onChange={set.fabricType}
-            suggestions={knownFabrics}
-            placeholder="e.g. جاكار"
-          />
+          <AutocompleteInput value={fabricType} onChange={set.fabricType} suggestions={knownFabrics} placeholder="e.g. جاكار"/>
         </Field>
       </div>
       <Field label="Compatible machine types">
@@ -853,7 +857,7 @@ function TextileFormUI({ name,color,fabricType,categories,notes,isEdit,knownColo
       </Field>
       <Field label="Notes (optional)">
         <textarea style={{...S.input,height:52,resize:"vertical"} as CSSProperties}
-          value={notes} onChange={e=>set.notes(e.target.value)} placeholder="Any special notes about this textile…" />
+          value={notes} onChange={e=>set.notes(e.target.value)} placeholder="Any special notes…" />
       </Field>
       <button style={S.btnPrimary} onClick={onSave}>{isEdit?"Save changes":"Save textile"}</button>
     </>
@@ -881,6 +885,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [mCap,  setMCap]  = useState(String(DEFAULT_CAP))
 
   // textile form state
+  const [tCode,  setTCode]  = useState("")
   const [tName,  setTName]  = useState("")
   const [tColor, setTColor] = useState("")
   const [tFab,   setTFab]   = useState("")
@@ -888,8 +893,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [tNotes, setTNotes] = useState("")
 
   // order form state
-  const [oSelId,   setOSelId]   = useState<number|null>(null)
-  const [oTextile, setOTextile] = useState("")
+  const [oSelId,       setOSelId]       = useState<number|null>(null)
+  const [oTextileCode, setOTextileCode] = useState("")
+  const [oTextileName, setOTextileName] = useState("")
   const [oColor,   setOColor]   = useState("")
   const [oFabric,  setOFabric]  = useState("")
   const [oQty,     setOQty]     = useState("")
@@ -1046,7 +1052,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     const q = search.toLowerCase().trim()
     const filtered = q
       ? active.filter(o =>
-          o.textile.toLowerCase().includes(q) ||
+          o.textileCode.toLowerCase().includes(q) ||
+          (o.textileName ?? "").toLowerCase().includes(q) ||
           o.color.toLowerCase().includes(q) ||
           o.fabricType.toLowerCase().includes(q) ||
           (o.orderNumber ?? "").toLowerCase().includes(q)
@@ -1058,7 +1065,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         const db = b.deadline || "9999-99-99"
         if (da !== db) return da.localeCompare(db)
       }
-      return a.textile.localeCompare(b.textile, "ar")
+      return a.textileCode.localeCompare(b.textileCode, "ar")
     })
   }, [orders, search, orderSort])
 
@@ -1066,6 +1073,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     const q = textileSearch.toLowerCase().trim()
     const filtered = q
       ? textiles.filter(t =>
+          t.code.toLowerCase().includes(q) ||
           t.name.toLowerCase().includes(q) ||
           t.color.toLowerCase().includes(q) ||
           t.fabricType.toLowerCase().includes(q)
@@ -1076,7 +1084,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         const fc = a.fabricType.localeCompare(b.fabricType, "ar")
         if (fc !== 0) return fc
       }
-      return a.name.localeCompare(b.name, "ar")
+      return a.code.localeCompare(b.code, "ar")
     })
   }, [textiles, textileSearch, textileSort])
 
@@ -1150,28 +1158,49 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   }
 
   // textile actions
-  function resetTF() { setTName(""); setTColor(""); setTFab(""); setTCats([]); setTNotes("") }
+  function resetTF() { setTCode(""); setTName(""); setTColor(""); setTFab(""); setTCats([]); setTNotes("") }
 
   async function saveTextile() {
-    if (!tName.trim() || !tFab.trim() || tCats.length === 0) return
+    if (!tCode.trim() || !tFab.trim() || tCats.length === 0) return
     if (editT) {
-      const updated = { ...editT, name:tName, color:tColor, fabricType:tFab,
-        machineCategories:tCats, notes:tNotes }
+      const updated: Textile = { ...editT, code:tCode, name:tName, color:tColor,
+        fabricType:tFab, machineCategories:tCats, notes:tNotes }
       setTextiles(p => p.map(t => t.id===editT.id ? updated : t))
       await dbUpsert("textiles", updated as unknown as Record<string, unknown>)
+      // ── AUTO-LINK: update all orders that match this textile code
+      // with the new name so the worker doesn't have to re-enter it
+      if (tName.trim()) {
+        const updatedOrders = orders.map(o => {
+          if (o.textileCode !== tCode) return o
+          const linked = { ...o, textileName: tName }
+          dbUpsert("orders", linked as unknown as Record<string, unknown>)
+          return linked
+        })
+        setOrders(updatedOrders)
+      }
       setEditT(null)
     } else {
-      const created: Textile = { id:Date.now(), name:tName, color:tColor,
+      const created: Textile = { id:Date.now(), code:tCode, name:tName, color:tColor,
         fabricType:tFab, machineCategories:tCats, notes:tNotes }
       setTextiles(p => [...p, created])
       await dbUpsert("textiles", created as unknown as Record<string, unknown>)
+      // ── AUTO-LINK new textile: update matching existing orders
+      if (tName.trim()) {
+        const updatedOrders = orders.map(o => {
+          if (o.textileCode !== tCode) return o
+          const linked = { ...o, textileName: tName }
+          dbUpsert("orders", linked as unknown as Record<string, unknown>)
+          return linked
+        })
+        setOrders(updatedOrders)
+      }
       setShowTM(false)
     }
     resetTF()
   }
 
   function openEditTextile(t: Textile) {
-    setTName(t.name); setTColor(t.color); setTFab(t.fabricType)
+    setTCode(t.code); setTName(t.name); setTColor(t.color); setTFab(t.fabricType)
     setTCats(t.machineCategories); setTNotes(t.notes); setEditT(t)
   }
 
@@ -1183,15 +1212,17 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   // order actions
   function resetOF() {
     setOSelId(null)
-    setOTextile(""); setOColor(""); setOFabric(""); setOQty("")
+    setOTextileCode(""); setOTextileName(""); setOColor(""); setOFabric(""); setOQty("")
     setODl(""); setOPri("Normal"); setOCats([]); setONotes(""); setOOrderNum("")
   }
 
   async function saveOrder() {
-    if (!oTextile.trim() || !oQty || oCats.length === 0) return
+    if (!oTextileCode.trim() || !oQty || oCats.length === 0) return
     const data: Order = {
       id: editO ? editO.id : Date.now(),
-      textile:oTextile, color:oColor, fabricType:oFabric,
+      textileCode: oTextileCode,
+      textileName: oTextileName,
+      color:oColor, fabricType:oFabric,
       quantity:Number(oQty), deadline:oDl, priority:oPri,
       machineCategories:oCats, warpStatus:editO?.warpStatus??"not-started", notes:oNotes,
       orderNumber: oOrderNum.trim() || undefined,
@@ -1206,16 +1237,12 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     await dbUpsert("orders", data as unknown as Record<string, unknown>)
 
     // auto-save to textile DB if manually entered and not already there
-    if (oSelId === null && oTextile.trim() && oFabric.trim() && oCats.length > 0) {
-      const alreadyExists = textiles.some(t =>
-        t.name.toLowerCase()      === oTextile.toLowerCase() &&
-        t.color.toLowerCase()     === oColor.toLowerCase() &&
-        t.fabricType.toLowerCase()=== oFabric.toLowerCase()
-      )
+    if (oSelId === null && oTextileCode.trim() && oFabric.trim() && oCats.length > 0) {
+      const alreadyExists = textiles.some(t => t.code.toLowerCase() === oTextileCode.toLowerCase())
       if (!alreadyExists) {
         const newT: Textile = {
           id: Date.now() + 1,
-          name:oTextile, color:oColor, fabricType:oFabric,
+          code:oTextileCode, name:oTextileName, color:oColor, fabricType:oFabric,
           machineCategories:oCats, notes:oNotes,
         }
         setTextiles(p => [...p, newT])
@@ -1227,7 +1254,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
   function openEditOrder(o: Order) {
     setOSelId(null)
-    setOTextile(o.textile); setOColor(o.color); setOFabric(o.fabricType)
+    setOTextileCode(o.textileCode); setOTextileName(o.textileName ?? "")
+    setOColor(o.color); setOFabric(o.fabricType)
     setOQty(String(o.quantity)); setODl(o.deadline); setOPri(o.priority)
     setOCats(o.machineCategories ?? []); setONotes(o.notes)
     setOOrderNum(o.orderNumber ?? ""); setEditO(o)
@@ -1356,7 +1384,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
   function exportCSV() {
     const rows = orders.map(o =>
-      [o.textile,o.color,o.fabricType,o.quantity,o.priority,o.deadline,o.warpStatus].join(",")
+      [o.textileCode,o.textileName,o.color,o.fabricType,o.quantity,o.priority,o.deadline,o.warpStatus].join(",")
     )
     const a = document.createElement("a")
     a.href = URL.createObjectURL(new Blob(
@@ -1417,16 +1445,21 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     groupOrderIds: number[],
     meters: number
   ) {
-    // get the orders, sorted alphabetically by textile name
+    // get the orders, sorted alphabetically by textile code then name
     const groupOrders = orders
       .filter(o => groupOrderIds.includes(o.id))
-      .sort((a, b) => a.textile.localeCompare(b.textile, "ar"))
+      .sort((a, b) => {
+        const codeComp = a.textileCode.localeCompare(b.textileCode, "ar")
+        if (codeComp !== 0) return codeComp
+        return (a.textileName ?? "").localeCompare(b.textileName ?? "", "ar")
+      })
 
     const date = new Date().toLocaleDateString("en-GB")
     const rows = groupOrders.map((o, i) => `
       <tr>
         <td>${i + 1}</td>
-        <td dir="auto">${o.textile}</td>
+        <td dir="auto">${o.textileCode}</td>
+        <td dir="auto">${o.textileName || "—"}</td>
         <td dir="auto">${o.color}</td>
         <td dir="auto">${o.fabricType}</td>
         <td>${o.quantity}m</td>
@@ -1496,7 +1529,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     <thead>
       <tr>
         <th>#</th>
-        <th>Textile</th>
+        <th>Code</th>
+        <th>Name</th>
         <th>Color</th>
         <th>Fabric type</th>
         <th>Quantity</th>
@@ -1557,13 +1591,15 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   // ── PROP BUNDLES ──────────────────────────────────────────
   const orderFormProps: OFProps = {
     textiles, selectedTextileId:oSelId,
-    textile:oTextile, color:oColor, fabricType:oFabric, quantity:oQty,
+    textileCode:oTextileCode, textileName:oTextileName,
+    color:oColor, fabricType:oFabric, quantity:oQty,
     deadline:oDl, priority:oPri, categories:oCats, notes:oNotes,
     orderNumber:oOrderNum,
     isEdit:!!editO,
     set:{
       selectedTextileId:setOSelId,
-      textile:setOTextile, color:setOColor, fabricType:setOFabric,
+      textileCode:setOTextileCode, textileName:setOTextileName,
+      color:setOColor, fabricType:setOFabric,
       quantity:setOQty, deadline:setODl, priority:setOPri,
       categories:setOCats, notes:setONotes, orderNumber:setOOrderNum,
     },
@@ -1575,9 +1611,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     onSave:saveMachine,
   }
   const textileFormProps: TFProps = {
-    name:tName, color:tColor, fabricType:tFab, categories:tCats, notes:tNotes,
+    code:tCode, name:tName, color:tColor, fabricType:tFab, categories:tCats, notes:tNotes,
     isEdit:!!editT, knownColors, knownFabrics,
-    set:{ name:setTName, color:setTColor, fabricType:setTFab, categories:setTCats, notes:setTNotes },
+    set:{ code:setTCode, name:setTName, color:setTColor, fabricType:setTFab, categories:setTCats, notes:setTNotes },
     onSave:saveTextile,
   }
 
@@ -1740,7 +1776,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                                 <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
                                   <div style={{flex:1}}>
                                     <div style={{...S.activeLabel,color:"#166534"}}>🔒 Running on machine</div>
-                                    <div style={{fontSize:13,fontWeight:500}}>{o.textile}</div>
+                                    <div style={{fontSize:13,fontWeight:500}}>{o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}</div>
                                     <div style={{fontSize:11,color:"#888"}}>{o.fabricType} · {o.color} · {o.quantity}m</div>
                                   </div>
                                 </div>
@@ -1792,7 +1828,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                                       background:bi===0&&oi===0?"#F8F7FF":"transparent"}}>
                                       <span style={S.qNum}>{running.length + warpBlocks.slice(0,bi).reduce((s,b)=>s+b.length,0) + oi + 1}</span>
                                       <span style={{flex:1,fontSize:12}}>
-                                        {o.textile} · {o.quantity}m
+                                        {o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""} · {o.quantity}m
                                         {o.orderNumber&&<span style={{color:"#aaa",marginLeft:6}}>#{o.orderNumber}</span>}
                                         {o.forcedMachineId&&<span style={{...S.sameWarp,marginLeft:4,background:"#F3F2FD",color:"#7F77DD"}}>⚡</span>}
                                       </span>
@@ -1916,7 +1952,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                     <div key={o.id} style={S.oRow}>
                       <div style={{width:6,height:6,borderRadius:"50%",background:priColor(o.priority),marginTop:5,flexShrink:0}}/>
                       <div style={{flex:1}}>
-                        <div style={{fontSize:14,fontWeight:500}}>{o.textile}</div>
+                        <div style={{fontSize:14,fontWeight:500}}>{o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}</div>
                         <div style={{fontSize:12,color:"#888",marginTop:2}}>{o.fabricType} · {o.color} · {(o.machineCategories??[]).join(", ")}</div>
                         {o.deadline&&(
                           <div style={{fontSize:11,marginTop:3,
@@ -2102,7 +2138,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           const doneOrders = orders.filter(o => o.warpStatus === "done")
           const filtered = historySearch.trim()
             ? doneOrders.filter(o =>
-                o.textile.toLowerCase().includes(historySearch.toLowerCase()) ||
+                o.textileCode.toLowerCase().includes(historySearch.toLowerCase()) ||
+                (o.textileName ?? "").toLowerCase().includes(historySearch.toLowerCase()) ||
                 o.color.toLowerCase().includes(historySearch.toLowerCase()) ||
                 o.fabricType.toLowerCase().includes(historySearch.toLowerCase())
               )
@@ -2154,7 +2191,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                           background:"#639922",marginTop:5,flexShrink:0}}/>
                         <div style={{flex:1}}>
                           <div style={{fontSize:14,fontWeight:500,
-                            textDecoration:"line-through",color:"#666"}}>{o.textile}</div>
+                            textDecoration:"line-through",color:"#666"}}>{o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}</div>
                           <div style={{fontSize:12,color:"#aaa",marginTop:2}}>
                             {o.fabricType} · {o.color} · {(o.machineCategories??[]).join(", ")}
                           </div>
@@ -2241,7 +2278,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               suggestions.push({
                 id: `move-${o.id}`,
                 type: "move-to-free-machine",
-                title: `Move "${o.textile}" off overloaded ${m.name}`,
+                title: `Move "${o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}" off overloaded ${m.name}`,
                 detail: `This order (${o.quantity}m · ${o.fabricType} · ${o.color}) is on ${m.name} which is at ${Math.round(ld/cap*100)}% capacity. It can also run on ${best.name} which has room.${sameWarp ? " ✦ Same warp already on "+best.name+" — no changeover needed." : ""}`,
                 impact: `Frees ${o.quantity}m from ${m.name} · ${sameWarp ? "zero extra changeover" : "one new changeover on "+best.name}`,
                 affectedOrderIds: [o.id],
@@ -2309,8 +2346,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               suggestions.push({
                 id: `urgent-${o.id}`,
                 type: "split-overloaded",
-                title: `Urgent order "${o.textile}" is queued behind lower-priority work`,
-                detail: `"${o.textile}" (High priority, due in ${Math.round(diff)} days) is position ${i+1} in ${m.name}'s queue. There are ${aheadLow.length} lower-priority order${aheadLow.length>1?"s":""} ahead of it.`,
+                title: `Urgent order "${o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}" is queued behind lower-priority work`,
+                detail: `"${o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}" (High priority, due in ${Math.round(diff)} days) is position ${i+1} in ${m.name}'s queue. There are ${aheadLow.length} lower-priority order${aheadLow.length>1?"s":""} ahead of it.`,
                 impact: `Reorder queue to run urgent order first`,
                 affectedOrderIds: [o.id],
                 targetMachineId: m.id,
@@ -2462,7 +2499,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                     <div style={{width:36,height:36,borderRadius:8,background:"#EEEDFE",display:"flex",
                       alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>🧵</div>
                     <div style={{flex:1}}>
-                      <div style={{fontSize:14,fontWeight:500,direction:"auto" as CSSProperties["direction"]}}>{t.name}</div>
+                      <div style={{fontSize:14,fontWeight:500,direction:"auto" as CSSProperties["direction"]}}>{t.code}{t.name ? ` — ${t.name}` : ""}</div>
                       <div style={{fontSize:12,color:"#888",marginTop:2,direction:"auto" as CSSProperties["direction"]}}>{t.fabricType} · {t.color}</div>
                       <div style={{fontSize:11,color:"#aaa",marginTop:4,display:"flex",flexWrap:"wrap",gap:4}}>
                         {t.machineCategories.map(c=>(
@@ -2518,7 +2555,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
       {/* ── FORCE SWITCH MODAL ────────────────────────── */}
       {forceSwitchOrder&&(
-        <Modal title={`Force switch: ${forceSwitchOrder.textile}`} onClose={()=>setForceSwitchOrder(null)}>
+        <Modal title={`Force switch: ${forceSwitchOrder.textileCode}`} onClose={()=>setForceSwitchOrder(null)}>
           <div style={{fontSize:13,color:"#888",marginBottom:16}}>
             Pick a machine to force-assign this order to. The optimizer will be overridden
             and this order will stay on the chosen machine until you clear it.
