@@ -911,6 +911,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [historySearch, setHistorySearch] = useState("")
   const [warpOrder, setWarpOrder] = useState<WarpOrder>({})
   const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(new Set())
+  const [warpGroupSearch, setWarpGroupSearch] = useState("")
   const [orderSort,   setOrderSort]   = useState<"name" | "deadline">("name")
   const [textileSearch, setTextileSearch] = useState("")
   const [textileSort,   setTextileSort]   = useState<"name" | "fabricType">("name")
@@ -1853,10 +1854,39 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
               {/* warp groups card */}
               <div style={S.card}>
-                <div style={S.cHead}><span style={S.cTitle}>Warp groups</span><span style={S.cSub}>per machine · fabric + color</span></div>
+                <div style={S.cHead}>
+                  <span style={S.cTitle}>Warp groups</span>
+                  <span style={S.cSub}>{Object.keys(warpGroups).length} total</span>
+                  <div style={{position:"relative",display:"flex",alignItems:"center",marginLeft:"auto"}}>
+                    <span style={{position:"absolute",left:9,fontSize:12,pointerEvents:"none",color:"#aaa"}}>🔍</span>
+                    <input
+                      style={{...S.search,width:180,marginBottom:0,paddingLeft:28,fontSize:12}}
+                      placeholder="Search warps…"
+                      value={warpGroupSearch}
+                      onChange={e=>setWarpGroupSearch(e.target.value)}
+                      dir="auto"
+                    />
+                    {warpGroupSearch && (
+                      <button
+                        onClick={()=>setWarpGroupSearch("")}
+                        style={{position:"absolute",right:8,background:"none",border:"none",
+                          cursor:"pointer",color:"#aaa",fontSize:13,lineHeight:1}}>
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </div>
                 <div style={S.cBody}>
                   {Object.keys(warpGroups).length===0&&<div style={S.empty}>No orders yet.</div>}
-                  {Object.entries(warpGroups).map(([key,{label,machine,meters,count,orderIds,closed}])=>(
+                  {(()=>{
+                    const q = warpGroupSearch.toLowerCase().trim()
+                    const entries = Object.entries(warpGroups).filter(([,{label,machine}])=>
+                      !q ||
+                      label.toLowerCase().includes(q) ||
+                      machine.toLowerCase().includes(q)
+                    )
+                    if (entries.length===0) return <div style={S.empty}>No warp groups match "{warpGroupSearch}"</div>
+                    return <>{entries.map(([key,{label,machine,meters,count,orderIds,closed}])=>(
                     <div key={key} style={{padding:"10px 0",borderBottom:"0.5px solid #f5f5f5",
                       opacity: closed ? 0.85 : 1}}>
                       <div style={{display:"flex",alignItems:"center"}}>
@@ -1906,7 +1936,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                         </button>
                       </div>
                     </div>
-                  ))}
+                  ))}</>
+                  })()}
                 </div>
               </div>
             </div>
