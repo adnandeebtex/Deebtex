@@ -460,6 +460,8 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
 function priColor(p: string)     { return p==="High"?"#E24B4A":p==="Normal"?"#378ADD":"#9ca3af" }
 function statColor(s: string)    { return s==="OVERLOADED"?"#E24B4A":s==="BUSY"?"#378ADD":s==="ACTIVE"?"#639922":"#9ca3af" }
 function warpColor(s: WarpStatus){ return s==="on-machine"?"#639922":s==="done"?"#378ADD":"#9ca3af" }
+// Format an order's display label — code + name if name exists
+function orderLabel(o: Order)    { return o.textileName ? o.textileCode + " — " + o.textileName : o.textileCode }
 function dlWarn(d: string)       {
   if (!d) return "none"
   const diff = (new Date(d).getTime() - Date.now()) / 86400000
@@ -1776,7 +1778,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                                 <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
                                   <div style={{flex:1}}>
                                     <div style={{...S.activeLabel,color:"#166534"}}>🔒 Running on machine</div>
-                                    <div style={{fontSize:13,fontWeight:500}}>{o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}</div>
+                                    <div style={{fontSize:13,fontWeight:500}}>{orderLabel(o)}</div>
                                     <div style={{fontSize:11,color:"#888"}}>{o.fabricType} · {o.color} · {o.quantity}m</div>
                                   </div>
                                 </div>
@@ -1828,7 +1830,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                                       background:bi===0&&oi===0?"#F8F7FF":"transparent"}}>
                                       <span style={S.qNum}>{running.length + warpBlocks.slice(0,bi).reduce((s,b)=>s+b.length,0) + oi + 1}</span>
                                       <span style={{flex:1,fontSize:12}}>
-                                        {o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""} · {o.quantity}m
+                                        {orderLabel(o)} · {o.quantity}m
                                         {o.orderNumber&&<span style={{color:"#aaa",marginLeft:6}}>#{o.orderNumber}</span>}
                                         {o.forcedMachineId&&<span style={{...S.sameWarp,marginLeft:4,background:"#F3F2FD",color:"#7F77DD"}}>⚡</span>}
                                       </span>
@@ -1952,7 +1954,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                     <div key={o.id} style={S.oRow}>
                       <div style={{width:6,height:6,borderRadius:"50%",background:priColor(o.priority),marginTop:5,flexShrink:0}}/>
                       <div style={{flex:1}}>
-                        <div style={{fontSize:14,fontWeight:500}}>{o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}</div>
+                        <div style={{fontSize:14,fontWeight:500}}>{orderLabel(o)}</div>
                         <div style={{fontSize:12,color:"#888",marginTop:2}}>{o.fabricType} · {o.color} · {(o.machineCategories??[]).join(", ")}</div>
                         {o.deadline&&(
                           <div style={{fontSize:11,marginTop:3,
@@ -2191,7 +2193,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                           background:"#639922",marginTop:5,flexShrink:0}}/>
                         <div style={{flex:1}}>
                           <div style={{fontSize:14,fontWeight:500,
-                            textDecoration:"line-through",color:"#666"}}>{o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}</div>
+                            textDecoration:"line-through",color:"#666"}}>{orderLabel(o)}</div>
                           <div style={{fontSize:12,color:"#aaa",marginTop:2}}>
                             {o.fabricType} · {o.color} · {(o.machineCategories??[]).join(", ")}
                           </div>
@@ -2278,7 +2280,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               suggestions.push({
                 id: `move-${o.id}`,
                 type: "move-to-free-machine",
-                title: `Move "${o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}" off overloaded ${m.name}`,
+                title: `Move "${orderLabel(o)}" off overloaded ${m.name}`,
                 detail: `This order (${o.quantity}m · ${o.fabricType} · ${o.color}) is on ${m.name} which is at ${Math.round(ld/cap*100)}% capacity. It can also run on ${best.name} which has room.${sameWarp ? " ✦ Same warp already on "+best.name+" — no changeover needed." : ""}`,
                 impact: `Frees ${o.quantity}m from ${m.name} · ${sameWarp ? "zero extra changeover" : "one new changeover on "+best.name}`,
                 affectedOrderIds: [o.id],
@@ -2346,8 +2348,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               suggestions.push({
                 id: `urgent-${o.id}`,
                 type: "split-overloaded",
-                title: `Urgent order "${o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}" is queued behind lower-priority work`,
-                detail: `"${o.textileCode}{o.textileName ? ` — ${o.textileName}` : ""}" (High priority, due in ${Math.round(diff)} days) is position ${i+1} in ${m.name}'s queue. There are ${aheadLow.length} lower-priority order${aheadLow.length>1?"s":""} ahead of it.`,
+                title: `Urgent order "${orderLabel(o)}" is queued behind lower-priority work`,
+                detail: `"${orderLabel(o)}" (High priority, due in ${Math.round(diff)} days) is position ${i+1} in ${m.name}'s queue. There are ${aheadLow.length} lower-priority order${aheadLow.length>1?"s":""} ahead of it.`,
                 impact: `Reorder queue to run urgent order first`,
                 affectedOrderIds: [o.id],
                 targetMachineId: m.id,
