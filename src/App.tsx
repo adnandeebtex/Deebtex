@@ -159,11 +159,45 @@ type MachineCategory =
   | "Mechanical Double 280" | "Mechanical Double 140"
 type Priority   = "High" | "Normal" | "Low"
 type WarpStatus = "not-started" | "on-machine" | "done"
-type View = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history" | "suggestions"
+type View = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history" | "suggestions" | "threads" | "textile-stock"
 
 // warpOrder: per-machine ordered list of warpKeys — controls which warp group runs first
 // key = machineId, value = array of warpKeys in display order
 type WarpOrder = Record<number, string[]>
+
+// ── THREAD (raw material wound onto warp beam) ───────────────
+type Thread = {
+  id: number
+  code: string           // e.g. "THR-001"
+  name: string           // e.g. "Cotton 60/2"
+  color: string
+  stockKg: number        // current stock in kg
+  minThreshold: number   // low stock alert below this
+  notes: string
+}
+
+// ── STOCK LOG ENTRY (in or out) ──────────────────────────────
+type StockLogEntry = {
+  id: number
+  itemId: number         // thread id or textile code reference
+  itemType: "thread" | "textile-stock"
+  direction: "in" | "out"
+  quantityKg?: number    // for threads
+  quantityM?: number     // for textile stock
+  date: string           // ISO date string
+  note: string           // e.g. "Received from supplier" / "Delivered to client X"
+  autoDeducted?: boolean // true = deducted automatically when warp was marked done
+}
+
+// ── TEXTILE STOCK (finished goods not yet delivered) ──────────
+type TextileStock = {
+  id: number
+  textileCode: string    // links to Textile.code
+  textileName: string
+  stockM: number         // current finished stock in meters
+  minThreshold: number   // low stock alert
+  notes: string
+}
 
 type Machine = {
   id: number; name: string; category: MachineCategory; capacity: number
@@ -253,18 +287,79 @@ function sanitizeMachine(row: Record<string, unknown>): Machine {
   }
 }
 
+function sanitizeThread(row: Record<string, unknown>): Thread {
+  return {
+    id:           Number(row.id),
+    code:         String(row.code ?? ""),
+    name:         String(row.name ?? ""),
+    color:        String(row.color ?? ""),
+    stockKg:      Number(row.stockKg ?? 0),
+    minThreshold: Number(row.minThreshold ?? 0),
+    notes:        String(row.notes ?? ""),
+  }
+}
+
+function sanitizeStockLog(row: Record<string, unknown>): StockLogEntry {
+  return {
+    id:            Number(row.id),
+    itemId:        Number(row.itemId ?? 0),
+    itemType:      (row.itemType as "thread" | "textile-stock") ?? "thread",
+    direction:     (row.direction as "in" | "out") ?? "in",
+    quantityKg:    row.quantityKg != null ? Number(row.quantityKg) : undefined,
+    quantityM:     row.quantityM  != null ? Number(row.quantityM)  : undefined,
+    date:          String(row.date ?? ""),
+    note:          String(row.note ?? ""),
+    autoDeducted:  row.autoDeducted === true,
+  }
+}
+
+function sanitizeTextileStock(row: Record<string, unknown>): TextileStock {
+  return {
+    id:           Number(row.id),
+    textileCode:  String(row.textileCode ?? ""),
+    textileName:  String(row.textileName ?? ""),
+    stockM:       Number(row.stockM ?? 0),
+    minThreshold: Number(row.minThreshold ?? 0),
+    notes:        String(row.notes ?? ""),
+  }
+}
+
+function sanitizeTextile(row: Record<string, unknown>): Textile {
+  return {
+    id:                Number(row.id),
+    // support old rows that only have "name" — treat it as code
+    code:              String(row.code ?? row.name ?? ""),
+    name:              String(row.name ?? ""),
+    color:             String(row.color ?? ""),
+    fabricType:        String(row.fabricType ?? ""),
+    machineCategories: (row.machineCategories as MachineCategory[]) ?? [],
+    notes:             String(row.notes ?? ""),
+  }
+}
+
 async function dbLoadOrders(): Promise<Order[]> {
   const rows = await dbLoadRaw<Record<string, unknown>>("orders")
   return rows.map(sanitizeOrder)
 }
-
 async function dbLoadMachines(): Promise<Machine[]> {
   const rows = await dbLoadRaw<Record<string, unknown>>("machines")
   return rows.map(sanitizeMachine)
 }
-
 async function dbLoadTextiles(): Promise<Textile[]> {
-  return dbLoadRaw<Textile>("textiles")
+  const rows = await dbLoadRaw<Record<string, unknown>>("textiles")
+  return rows.map(sanitizeTextile)
+}
+async function dbLoadThreads(): Promise<Thread[]> {
+  const rows = await dbLoadRaw<Record<string, unknown>>("threads")
+  return rows.map(sanitizeThread)
+}
+async function dbLoadStockLog(): Promise<StockLogEntry[]> {
+  const rows = await dbLoadRaw<Record<string, unknown>>("stock_log")
+  return rows.map(sanitizeStockLog)
+}
+async function dbLoadTextileStock(): Promise<TextileStock[]> {
+  const rows = await dbLoadRaw<Record<string, unknown>>("textile_stock")
+  return rows.map(sanitizeTextileStock)
 }
 
 // Upsert with retry + visible error + localStorage backup
@@ -866,20 +961,32 @@ function TextileFormUI({ code,name,color,fabricType,categories,notes,isEdit,know
   )
 }
 function App({ onLogout }: { session: Session; onLogout: () => void }) {
-  const [machines,  setMachines]  = useState<Machine[]>([])
-  const [orders,    setOrders]    = useState<Order[]>([])
-  const [textiles,  setTextiles]  = useState<Textile[]>([])
+  const [machines,     setMachines]     = useState<Machine[]>([])
+  const [orders,       setOrders]       = useState<Order[]>([])
+  const [textiles,     setTextiles]     = useState<Textile[]>([])
+  const [threads,      setThreads]      = useState<Thread[]>([])
+  const [stockLog,     setStockLog]     = useState<StockLogEntry[]>([])
+  const [textileStock, setTextileStock] = useState<TextileStock[]>([])
   const [schedule,  setSchedule]  = useState<Record<number,Order[]>>({})
   const [ready,     setReady]     = useState(false)
   const [view,      setView]      = useState<View>("dashboard")
   const [search,    setSearch]    = useState("")
 
-  const [showOM, setShowOM] = useState(false)
-  const [showMM, setShowMM] = useState(false)
-  const [showTM, setShowTM] = useState(false)
-  const [editO,  setEditO]  = useState<Order|null>(null)
-  const [editM,  setEditM]  = useState<Machine|null>(null)
-  const [editT,  setEditT]  = useState<Textile|null>(null)
+  const [showOM,  setShowOM]  = useState(false)
+  const [showMM,  setShowMM]  = useState(false)
+  const [showTM,  setShowTM]  = useState(false)
+  const [showThM, setShowThM] = useState(false)   // thread modal
+  const [showTSM, setShowTSM] = useState(false)   // textile stock modal
+  const [editO,   setEditO]   = useState<Order|null>(null)
+  const [editM,   setEditM]   = useState<Machine|null>(null)
+  const [editT,   setEditT]   = useState<Textile|null>(null)
+  const [editTh,  setEditTh]  = useState<Thread|null>(null)
+  const [editTS,  setEditTS]  = useState<TextileStock|null>(null)
+
+  // warp done deduction modal
+  const [warpDoneGroup, setWarpDoneGroup] = useState<{orderIds:number[];label:string;machine:string;meters:number}|null>(null)
+  const [warpDoneThreadId, setWarpDoneThreadId] = useState<number|null>(null)
+  const [warpDoneKg, setWarpDoneKg] = useState("")
 
   // machine form state
   const [mName, setMName] = useState("")
@@ -893,6 +1000,29 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [tFab,   setTFab]   = useState("")
   const [tCats,  setTCats]  = useState<MachineCategory[]>([])
   const [tNotes, setTNotes] = useState("")
+
+  // thread form state
+  const [thCode,  setThCode]  = useState("")
+  const [thName,  setThName]  = useState("")
+  const [thColor, setThColor] = useState("")
+  const [thStock, setThStock] = useState("")
+  const [thMin,   setThMin]   = useState("")
+  const [thNotes, setThNotes] = useState("")
+
+  // textile stock form state
+  const [tsCode,  setTsCode]  = useState("")
+  const [tsName,  setTsName]  = useState("")
+  const [tsStock, setTsStock] = useState("")
+  const [tsMin,   setTsMin]   = useState("")
+  const [tsNotes, setTsNotes] = useState("")
+
+  // manual stock log form
+  const [logItemId,   setLogItemId]   = useState<number|null>(null)
+  const [logType,     setLogType]     = useState<"thread"|"textile-stock">("thread")
+  const [logDir,      setLogDir]      = useState<"in"|"out">("in")
+  const [logQty,      setLogQty]      = useState("")
+  const [logNote,     setLogNote]     = useState("")
+  const [showLogM,    setShowLogM]    = useState(false)
 
   // order form state
   const [oSelId,       setOSelId]       = useState<number|null>(null)
@@ -921,51 +1051,34 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
   useEffect(() => {
     // 1. Load all data on mount
+    async function recoverFromBackup<T extends { id: number }>(
+      table: string, oldKey: string, dbRows: T[],
+      sanitize: (r: Record<string, unknown>) => T
+    ): Promise<T[]> {
+      try {
+        const backupRaw = localStorage.getItem(`dtx_backup_${table}`) || "[]"
+        const oldRaw    = localStorage.getItem(oldKey) || "[]"
+        const backup: Record<string, unknown>[] = [...JSON.parse(backupRaw), ...JSON.parse(oldRaw)]
+        if (backup.length === 0) return dbRows
+        const dbIds = new Set(dbRows.map(r => r.id))
+        const missing = backup.filter(r => !dbIds.has(Number(r.id)))
+        if (missing.length === 0) return dbRows
+        for (const row of missing) await dbUpsert(table, row)
+        return [...dbRows, ...missing.map(sanitize)]
+      } catch { return dbRows }
+    }
+
     async function loadAll() {
-      const [m, o, t] = await Promise.all([
-        dbLoadMachines(),
-        dbLoadOrders(),
-        dbLoadTextiles(),
+      const [m, o, t, th, sl, ts] = await Promise.all([
+        dbLoadMachines(), dbLoadOrders(), dbLoadTextiles(),
+        dbLoadThreads(), dbLoadStockLog(), dbLoadTextileStock(),
       ])
-
-      // ── RECOVERY: merge localStorage backup into Supabase if rows are missing
-      async function recoverFromBackup<T extends { id: number }>(
-        table: string,
-        oldKey: string,   // pre-Supabase localStorage key
-        dbRows: T[],
-        sanitize: (r: Record<string, unknown>) => T
-      ): Promise<T[]> {
-        try {
-          // check both old localStorage key and new backup key
-          const backupRaw  = localStorage.getItem(`dtx_backup_${table}`) || "[]"
-          const oldRaw     = localStorage.getItem(oldKey) || "[]"
-          const backup: Record<string, unknown>[] = [
-            ...JSON.parse(backupRaw),
-            ...JSON.parse(oldRaw),
-          ]
-          if (backup.length === 0) return dbRows
-          const dbIds  = new Set(dbRows.map(r => r.id))
-          const missing = backup.filter(r => !dbIds.has(Number(r.id)))
-          if (missing.length === 0) return dbRows
-          console.log(`Recovering ${missing.length} missing ${table} rows...`)
-          for (const row of missing) {
-            await dbUpsert(table, row)
-          }
-          return [...dbRows, ...missing.map(sanitize)]
-        } catch (e) {
-          console.error("Recovery error:", e)
-          return dbRows
-        }
-      }
-
       const [recoveredO, recoveredT] = await Promise.all([
         recoverFromBackup("orders",   "dtx_orders",   o, sanitizeOrder),
         recoverFromBackup("textiles", "dtx_textiles", t, r => r as Textile),
       ])
-
-      setMachines(m)
-      setOrders(recoveredO)
-      setTextiles(recoveredT)
+      setMachines(m); setOrders(recoveredO); setTextiles(recoveredT)
+      setThreads(th); setStockLog(sl); setTextileStock(ts)
       setReady(true)
     }
     loadAll()
@@ -1040,6 +1153,28 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           const id = (payload.old as Record<string, unknown>).id as number
           setTextiles(p => p.filter(x => x.id !== id))
         })
+
+      // ── THREADS ──
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "threads" },
+        (payload) => { const t = sanitizeThread(payload.new as Record<string,unknown>); setThreads(p => p.some(x=>x.id===t.id)?p:[...p,t]) })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "threads" },
+        (payload) => { const t = sanitizeThread(payload.new as Record<string,unknown>); setThreads(p => p.map(x=>x.id===t.id?t:x)) })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "threads" },
+        (payload) => { const id=(payload.old as Record<string,unknown>).id as number; setThreads(p=>p.filter(x=>x.id!==id)) })
+
+      // ── STOCK LOG ──
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "stock_log" },
+        (payload) => { const l = sanitizeStockLog(payload.new as Record<string,unknown>); setStockLog(p => p.some(x=>x.id===l.id)?p:[...p,l]) })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "stock_log" },
+        (payload) => { const id=(payload.old as Record<string,unknown>).id as number; setStockLog(p=>p.filter(x=>x.id!==id)) })
+
+      // ── TEXTILE STOCK ──
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "textile_stock" },
+        (payload) => { const t = sanitizeTextileStock(payload.new as Record<string,unknown>); setTextileStock(p => p.some(x=>x.id===t.id)?p:[...p,t]) })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "textile_stock" },
+        (payload) => { const t = sanitizeTextileStock(payload.new as Record<string,unknown>); setTextileStock(p => p.map(x=>x.id===t.id?t:x)) })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "textile_stock" },
+        (payload) => { const id=(payload.old as Record<string,unknown>).id as number; setTextileStock(p=>p.filter(x=>x.id!==id)) })
 
       .subscribe()
 
@@ -1273,7 +1408,144 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     await dbDelete("machines", id)
   }
 
-  // ── FEATURE 1: toggle machine out-of-order
+  // ── THREAD ACTIONS ────────────────────────────────────────
+  function resetThF() { setThCode(""); setThName(""); setThColor(""); setThStock(""); setThMin(""); setThNotes("") }
+
+  async function saveThread() {
+    if (!thCode.trim()) return
+    if (editTh) {
+      const updated: Thread = { ...editTh, code:thCode, name:thName, color:thColor,
+        stockKg:Number(thStock)||0, minThreshold:Number(thMin)||0, notes:thNotes }
+      setThreads(p => p.map(t => t.id===editTh.id ? updated : t))
+      await dbUpsert("threads", updated as unknown as Record<string,unknown>)
+      setEditTh(null)
+    } else {
+      const created: Thread = { id:Date.now(), code:thCode, name:thName, color:thColor,
+        stockKg:Number(thStock)||0, minThreshold:Number(thMin)||0, notes:thNotes }
+      setThreads(p => [...p, created])
+      await dbUpsert("threads", created as unknown as Record<string,unknown>)
+      setShowThM(false)
+    }
+    resetThF()
+  }
+
+  function openEditThread(t: Thread) {
+    setThCode(t.code); setThName(t.name); setThColor(t.color)
+    setThStock(String(t.stockKg)); setThMin(String(t.minThreshold)); setThNotes(t.notes)
+    setEditTh(t)
+  }
+
+  async function delThread(id: number) {
+    setThreads(p => p.filter(t => t.id!==id))
+    await dbDelete("threads", id)
+  }
+
+  // ── TEXTILE STOCK ACTIONS ──────────────────────────────────
+  function resetTsF() { setTsCode(""); setTsName(""); setTsStock(""); setTsMin(""); setTsNotes("") }
+
+  async function saveTextileStockItem() {
+    if (!tsCode.trim()) return
+    if (editTS) {
+      const updated: TextileStock = { ...editTS, textileCode:tsCode, textileName:tsName,
+        stockM:Number(tsStock)||0, minThreshold:Number(tsMin)||0, notes:tsNotes }
+      setTextileStock(p => p.map(t => t.id===editTS.id ? updated : t))
+      await dbUpsert("textile_stock", updated as unknown as Record<string,unknown>)
+      setEditTS(null)
+    } else {
+      const created: TextileStock = { id:Date.now(), textileCode:tsCode, textileName:tsName,
+        stockM:Number(tsStock)||0, minThreshold:Number(tsMin)||0, notes:tsNotes }
+      setTextileStock(p => [...p, created])
+      await dbUpsert("textile_stock", created as unknown as Record<string,unknown>)
+      setShowTSM(false)
+    }
+    resetTsF()
+  }
+
+  function openEditTextileStock(ts: TextileStock) {
+    setTsCode(ts.textileCode); setTsName(ts.textileName)
+    setTsStock(String(ts.stockM)); setTsMin(String(ts.minThreshold)); setTsNotes(ts.notes)
+    setEditTS(ts)
+  }
+
+  async function delTextileStock(id: number) {
+    setTextileStock(p => p.filter(t => t.id!==id))
+    await dbDelete("textile_stock", id)
+  }
+
+  // ── STOCK LOG: add a manual entry and update running stock ─
+  async function addStockLog(
+    itemId: number, itemType: "thread"|"textile-stock",
+    direction: "in"|"out", qty: number, note: string, auto = false
+  ) {
+    const entry: StockLogEntry = {
+      id: Date.now(), itemId, itemType, direction,
+      quantityKg:  itemType==="thread"          ? qty : undefined,
+      quantityM:   itemType==="textile-stock"   ? qty : undefined,
+      date: new Date().toISOString().slice(0,10),
+      note, autoDeducted: auto,
+    }
+    setStockLog(p => [...p, entry])
+    await dbUpsert("stock_log", entry as unknown as Record<string,unknown>)
+
+    // update running stock
+    if (itemType === "thread") {
+      const delta = direction==="in" ? qty : -qty
+      setThreads(p => p.map(t => {
+        if (t.id !== itemId) return t
+        const updated = { ...t, stockKg: Math.max(0, t.stockKg + delta) }
+        dbUpsert("threads", updated as unknown as Record<string,unknown>)
+        return updated
+      }))
+    } else {
+      const delta = direction==="in" ? qty : -qty
+      setTextileStock(p => p.map(ts => {
+        if (ts.id !== itemId) return ts
+        const updated = { ...ts, stockM: Math.max(0, ts.stockM + delta) }
+        dbUpsert("textile_stock", updated as unknown as Record<string,unknown>)
+        return updated
+      }))
+    }
+  }
+
+  async function submitManualLog() {
+    if (!logItemId || !logQty) return
+    await addStockLog(logItemId, logType, logDir, Number(logQty), logNote)
+    setLogItemId(null); setLogQty(""); setLogNote(""); setShowLogM(false)
+  }
+
+  // ── WARP DONE: intercept to show thread deduction modal ───
+  function handleWarpNextRun(orderIds: number[], label: string, machine: string, meters: number) {
+    setWarpDoneGroup({ orderIds, label, machine, meters })
+    setWarpDoneThreadId(null)
+    setWarpDoneKg("")
+  }
+
+  async function confirmWarpDone() {
+    if (!warpDoneGroup) return
+    await warpNextRun(warpDoneGroup.orderIds)
+    // auto-deduct thread stock if user selected a thread
+    if (warpDoneThreadId && warpDoneKg) {
+      await addStockLog(warpDoneThreadId, "thread", "out", Number(warpDoneKg),
+        "Auto-deducted: warp done — " + warpDoneGroup.label, true)
+    }
+    setWarpDoneGroup(null); setWarpDoneThreadId(null); setWarpDoneKg("")
+  }
+
+  // ── LOW STOCK ALERTS ──────────────────────────────────────
+  const lowStockAlerts = useMemo(() => {
+    const alerts: {label:string; current:string; min:string; type:"thread"|"textile"}[] = []
+    for (const t of threads) {
+      if (t.minThreshold > 0 && t.stockKg <= t.minThreshold) {
+        alerts.push({ label:`${t.code}${t.name?" — "+t.name:""}`, current:`${t.stockKg}kg`, min:`${t.minThreshold}kg`, type:"thread" })
+      }
+    }
+    for (const ts of textileStock) {
+      if (ts.minThreshold > 0 && ts.stockM <= ts.minThreshold) {
+        alerts.push({ label:`${ts.textileCode}${ts.textileName?" — "+ts.textileName:""}`, current:`${ts.stockM}m`, min:`${ts.minThreshold}m`, type:"textile" })
+      }
+    }
+    return alerts
+  }, [threads, textileStock])
   // not-started orders re-optimize automatically (scheduler excludes OOO machines)
   // on-machine orders stay (can't move mid-run) but show a warning
   async function toggleOutOfOrder(m: Machine) {
@@ -1622,19 +1894,51 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
   // ── NAV ───────────────────────────────────────────────────
   const NAV: {id:View;icon:string;label:string}[] = [
-    {id:"dashboard",   icon:"⊞", label:"Dashboard"},
-    {id:"orders",      icon:"≡", label:"Orders"},
-    {id:"machines",    icon:"⚙", label:"Machines"},
-    {id:"textiles",    icon:"🧵", label:"Textiles"},
-    {id:"analytics",   icon:"↗", label:"Analytics"},
-    {id:"history",     icon:"🕓", label:"History"},
-    {id:"suggestions", icon:"💡", label:"Suggestions"},
+    {id:"dashboard",     icon:"⊞", label:"Dashboard"},
+    {id:"orders",        icon:"≡", label:"Orders"},
+    {id:"machines",      icon:"⚙", label:"Machines"},
+    {id:"textiles",      icon:"🧵", label:"Textiles"},
+    {id:"threads",       icon:"🪡", label:"Threads"},
+    {id:"textile-stock", icon:"📦", label:"Stock"},
+    {id:"analytics",     icon:"↗", label:"Analytics"},
+    {id:"history",       icon:"🕓", label:"History"},
+    {id:"suggestions",   icon:"💡", label:"Suggestions"},
   ]
+
+  // ── LOADING GATE ──────────────────────────────────────────
+  // Show a proper loading screen instead of empty dashboard while
+  // Supabase data is fetching. Prevents the "everything disappeared"
+  // panic on slow connections.
+  if (!ready) {
+    return (
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center",
+        justifyContent:"center",height:"100vh",background:"#F7F6F3",
+        fontFamily:"'DM Sans','Segoe UI',system-ui,sans-serif",gap:16}}>
+        <div style={{width:44,height:44,borderRadius:10,background:"#7F77DD",
+          display:"flex",alignItems:"center",justifyContent:"center",
+          color:"#EEEDFE",fontWeight:700,fontSize:18}}>Dt</div>
+        <div style={{fontSize:14,color:"#aaa"}}>Loading your factory data…</div>
+        <div style={{
+          width:180,height:3,background:"#e5e5e5",borderRadius:2,overflow:"hidden",
+        }}>
+          <div style={{
+            height:"100%",background:"#7F77DD",borderRadius:2,
+            animation:"dtx-load 1.4s ease-in-out infinite",
+            width:"40%",
+          }}/>
+        </div>
+        <style>{`
+          @keyframes dtx-load {
+            0%   { margin-left: -40%; }
+            100% { margin-left: 140%; }
+          }
+        `}</style>
+      </div>
+    )
+  }
 
   return (
     <div style={S.shell}>
-
-      {/* ── SIDEBAR ─────────────────────────────────────── */}
       <div style={S.sidebar}>
         <div style={S.logo}>Dt</div>
         {NAV.map(n => (
@@ -1724,6 +2028,13 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             {overloaded.map(m=>(
               <div key={m.id} style={S.alert}>
                 ⚠️ {m.name} is overloaded ({machineLoad(schedule,m.id)}m / {m.capacity}m). Reassign orders or increase capacity.
+              </div>
+            ))}
+
+            {/* low stock alerts */}
+            {lowStockAlerts.map((a,i)=>(
+              <div key={i} style={{...S.alert, background:"#FEF3C7", border:"0.5px solid #F59E0B", color:"#92400E"}}>
+                {a.type==="thread" ? "🪡" : "📦"} Low stock: <strong>{a.label}</strong> — {a.current} remaining (min: {a.min})
               </div>
             ))}
 
@@ -1913,10 +2224,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                       <div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}>
                         {!closed && (
                           <button
-                            onClick={()=>warpNextRun(orderIds)}
+                            onClick={()=>handleWarpNextRun(orderIds, label, machine, meters)}
                             style={{...S.btnSm,fontSize:11,padding:"4px 10px",
                               background:"#FEF9EE",color:"#92400E",border:"0.5px solid #FCD34D"}}
-                            title="Seal this warp — orders move to on-machine. New same-color orders start a fresh warp.">
+                            title="Seal this warp and log thread usage">
                             🔒 Warp done, start next
                           </button>
                         )}
@@ -2474,6 +2785,151 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           )
         })()}
 
+        {/* ── THREADS VIEW ──────────────────────────────── */}
+        {view==="threads" && (
+          <div style={S.viewPad}>
+            <div style={S.card}>
+              <div style={S.cHead}>
+                <span style={S.cTitle}>Thread stock</span>
+                <span style={S.cSub}>{threads.length} threads</span>
+                <button style={{...S.btnSm,marginLeft:"auto"}} onClick={()=>{resetThF();setShowThM(true)}}>+ Add thread</button>
+                <button style={{...S.btnSm,background:"#F3F2FD",color:"#534AB7",border:"0.5px solid #c4c0f0"}}
+                  onClick={()=>{setLogType("thread");setShowLogM(true)}}>📋 Log movement</button>
+              </div>
+              <div style={S.cBody}>
+                {threads.length===0&&<div style={S.empty}>No threads yet. Add your first thread above.</div>}
+                {[...threads].sort((a,b)=>a.code.localeCompare(b.code,"ar")).map(t=>{
+                  const isLow = t.minThreshold>0 && t.stockKg<=t.minThreshold
+                  const tLogs = stockLog.filter(l=>l.itemId===t.id && l.itemType==="thread")
+                  return (
+                    <div key={t.id} style={{padding:"14px 0",borderBottom:"0.5px solid #f5f5f5"}}>
+                      <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
+                        <div style={{width:36,height:36,borderRadius:8,
+                          background:isLow?"#FEEBEB":"#F3F2FD",
+                          display:"flex",alignItems:"center",justifyContent:"center",
+                          fontSize:20,flexShrink:0}}>🪡</div>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8}}>
+                            <span style={{fontSize:14,fontWeight:600}} dir="auto">{t.code}{t.name?` — ${t.name}`:""}</span>
+                            {isLow&&<span style={{background:"#FEEBEB",color:"#A32D2D",borderRadius:4,padding:"1px 7px",fontSize:11,fontWeight:600}}>⚠ LOW</span>}
+                          </div>
+                          <div style={{fontSize:12,color:"#888",marginTop:2}} dir="auto">{t.color}</div>
+                          <div style={{display:"flex",gap:16,marginTop:6}}>
+                            <div>
+                              <div style={{fontSize:11,color:"#aaa"}}>Current stock</div>
+                              <div style={{fontSize:18,fontWeight:600,color:isLow?"#E24B4A":"#1a1a1a"}}>{t.stockKg}kg</div>
+                            </div>
+                            {t.minThreshold>0&&<div>
+                              <div style={{fontSize:11,color:"#aaa"}}>Min threshold</div>
+                              <div style={{fontSize:18,fontWeight:500,color:"#888"}}>{t.minThreshold}kg</div>
+                            </div>}
+                          </div>
+                          {/* recent log entries */}
+                          {tLogs.length>0&&(
+                            <div style={{marginTop:8,borderTop:"0.5px solid #f0f0f0",paddingTop:8}}>
+                              <div style={{fontSize:11,color:"#aaa",marginBottom:4}}>Recent movements</div>
+                              {tLogs.slice(-5).reverse().map(l=>(
+                                <div key={l.id} style={{display:"flex",gap:8,fontSize:12,padding:"3px 0"}}>
+                                  <span style={{color:l.direction==="in"?"#639922":"#E24B4A",fontWeight:600,width:28}}>
+                                    {l.direction==="in"?"+":"-"}{l.quantityKg}kg
+                                  </span>
+                                  <span style={{color:"#aaa"}}>{l.date}</span>
+                                  <span style={{color:"#555",flex:1}}>{l.note||"—"}</span>
+                                  {l.autoDeducted&&<span style={{fontSize:10,color:"#7F77DD"}}>auto</span>}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div style={{display:"flex",gap:5,flexShrink:0}}>
+                          <button style={{...S.btnSm,fontSize:11,padding:"4px 10px",background:"#EDFBEE",color:"#166534",border:"0.5px solid #86EFAC"}}
+                            onClick={()=>{setLogType("thread");setLogItemId(t.id);setLogDir("in");setShowLogM(true)}}>+ In</button>
+                          <button style={{...S.btnSm,fontSize:11,padding:"4px 10px",background:"#FEEBEB",color:"#A32D2D",border:"0.5px solid #fca5a5"}}
+                            onClick={()=>{setLogType("thread");setLogItemId(t.id);setLogDir("out");setShowLogM(true)}}>− Out</button>
+                          <button style={S.btnIcon} onClick={()=>openEditThread(t)}>✏️</button>
+                          <button style={{...S.btnIcon,color:"#E24B4A"}} onClick={()=>delThread(t.id)}>🗑</button>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── TEXTILE STOCK VIEW ────────────────────────── */}
+        {view==="textile-stock" && (
+          <div style={S.viewPad}>
+            <div style={S.card}>
+              <div style={S.cHead}>
+                <span style={S.cTitle}>Finished textile stock</span>
+                <span style={S.cSub}>{textileStock.length} items</span>
+                <button style={{...S.btnSm,marginLeft:"auto"}} onClick={()=>{resetTsF();setShowTSM(true)}}>+ Add stock item</button>
+                <button style={{...S.btnSm,background:"#F3F2FD",color:"#534AB7",border:"0.5px solid #c4c0f0"}}
+                  onClick={()=>{setLogType("textile-stock");setShowLogM(true)}}>📋 Log movement</button>
+              </div>
+              <div style={S.cBody}>
+                {textileStock.length===0&&<div style={S.empty}>No textile stock yet. Add items above.</div>}
+                {[...textileStock].sort((a,b)=>a.textileCode.localeCompare(b.textileCode,"ar")).map(ts=>{
+                  const isLow = ts.minThreshold>0 && ts.stockM<=ts.minThreshold
+                  const tsLogs = stockLog.filter(l=>l.itemId===ts.id && l.itemType==="textile-stock")
+                  return (
+                    <div key={ts.id} style={{padding:"14px 0",borderBottom:"0.5px solid #f5f5f5"}}>
+                      <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
+                        <div style={{width:36,height:36,borderRadius:8,
+                          background:isLow?"#FEEBEB":"#EDFBEE",
+                          display:"flex",alignItems:"center",justifyContent:"center",
+                          fontSize:20,flexShrink:0}}>📦</div>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8}}>
+                            <span style={{fontSize:14,fontWeight:600}} dir="auto">
+                              {ts.textileCode}{ts.textileName?` — ${ts.textileName}`:""}
+                            </span>
+                            {isLow&&<span style={{background:"#FEEBEB",color:"#A32D2D",borderRadius:4,padding:"1px 7px",fontSize:11,fontWeight:600}}>⚠ LOW</span>}
+                          </div>
+                          <div style={{display:"flex",gap:16,marginTop:6}}>
+                            <div>
+                              <div style={{fontSize:11,color:"#aaa"}}>In stock</div>
+                              <div style={{fontSize:18,fontWeight:600,color:isLow?"#E24B4A":"#1a1a1a"}}>{ts.stockM}m</div>
+                            </div>
+                            {ts.minThreshold>0&&<div>
+                              <div style={{fontSize:11,color:"#aaa"}}>Min threshold</div>
+                              <div style={{fontSize:18,fontWeight:500,color:"#888"}}>{ts.minThreshold}m</div>
+                            </div>}
+                          </div>
+                          {tsLogs.length>0&&(
+                            <div style={{marginTop:8,borderTop:"0.5px solid #f0f0f0",paddingTop:8}}>
+                              <div style={{fontSize:11,color:"#aaa",marginBottom:4}}>Recent movements</div>
+                              {tsLogs.slice(-5).reverse().map(l=>(
+                                <div key={l.id} style={{display:"flex",gap:8,fontSize:12,padding:"3px 0"}}>
+                                  <span style={{color:l.direction==="in"?"#639922":"#E24B4A",fontWeight:600,width:36}}>
+                                    {l.direction==="in"?"+":"-"}{l.quantityM}m
+                                  </span>
+                                  <span style={{color:"#aaa"}}>{l.date}</span>
+                                  <span style={{color:"#555",flex:1}}>{l.note||"—"}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div style={{display:"flex",gap:5,flexShrink:0}}>
+                          <button style={{...S.btnSm,fontSize:11,padding:"4px 10px",background:"#EDFBEE",color:"#166534",border:"0.5px solid #86EFAC"}}
+                            onClick={()=>{setLogType("textile-stock");setLogItemId(ts.id);setLogDir("in");setShowLogM(true)}}>+ In</button>
+                          <button style={{...S.btnSm,fontSize:11,padding:"4px 10px",background:"#FEEBEB",color:"#A32D2D",border:"0.5px solid #fca5a5"}}
+                            onClick={()=>{setLogType("textile-stock");setLogItemId(ts.id);setLogDir("out");setShowLogM(true)}}>− Out</button>
+                          <button style={S.btnIcon} onClick={()=>openEditTextileStock(ts)}>✏️</button>
+                          <button style={{...S.btnIcon,color:"#E24B4A"}} onClick={()=>delTextileStock(ts.id)}>🗑</button>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── TEXTILES VIEW ─────────────────────────────── */}
         {view==="textiles" && (
           <div style={S.viewPad}>
@@ -2632,6 +3088,132 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               Clear force — let optimizer decide
             </button>
           )}
+        </Modal>
+      )}
+
+      {/* ── THREAD MODAL ──────────────────────────────── */}
+      {showThM&&(
+        <Modal title="New thread" onClose={()=>{setShowThM(false);resetThF()}}>
+          <Field label="Thread code"><input style={S.input} value={thCode} onChange={e=>setThCode(e.target.value)} placeholder="e.g. THR-001" dir="auto"/></Field>
+          <Field label="Thread name"><input style={S.input} value={thName} onChange={e=>setThName(e.target.value)} placeholder="e.g. Cotton 60/2" dir="auto"/></Field>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <Field label="Color"><input style={S.input} value={thColor} onChange={e=>setThColor(e.target.value)} placeholder="e.g. White" dir="auto"/></Field>
+            <Field label="Current stock (kg)"><input style={S.input} type="number" value={thStock} onChange={e=>setThStock(e.target.value)} placeholder="0"/></Field>
+            <Field label="Min threshold (kg)"><input style={S.input} type="number" value={thMin} onChange={e=>setThMin(e.target.value)} placeholder="0"/></Field>
+          </div>
+          <Field label="Notes (optional)"><input style={S.input} value={thNotes} onChange={e=>setThNotes(e.target.value)} placeholder="Supplier, specs…"/></Field>
+          <button style={S.btnPrimary} onClick={saveThread}>Save thread</button>
+        </Modal>
+      )}
+      {editTh&&(
+        <Modal title="Edit thread" onClose={()=>{setEditTh(null);resetThF()}}>
+          <Field label="Thread code"><input style={S.input} value={thCode} onChange={e=>setThCode(e.target.value)} dir="auto"/></Field>
+          <Field label="Thread name"><input style={S.input} value={thName} onChange={e=>setThName(e.target.value)} dir="auto"/></Field>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <Field label="Color"><input style={S.input} value={thColor} onChange={e=>setThColor(e.target.value)} dir="auto"/></Field>
+            <Field label="Current stock (kg)"><input style={S.input} type="number" value={thStock} onChange={e=>setThStock(e.target.value)}/></Field>
+            <Field label="Min threshold (kg)"><input style={S.input} type="number" value={thMin} onChange={e=>setThMin(e.target.value)}/></Field>
+          </div>
+          <Field label="Notes"><input style={S.input} value={thNotes} onChange={e=>setThNotes(e.target.value)}/></Field>
+          <button style={S.btnPrimary} onClick={saveThread}>Save changes</button>
+        </Modal>
+      )}
+
+      {/* ── TEXTILE STOCK MODAL ───────────────────────── */}
+      {showTSM&&(
+        <Modal title="New stock item" onClose={()=>{setShowTSM(false);resetTsF()}}>
+          <Field label="Textile code"><input style={S.input} value={tsCode} onChange={e=>setTsCode(e.target.value)} placeholder="e.g. 1138/01/01" dir="auto"/></Field>
+          <Field label="Textile name (optional)"><input style={S.input} value={tsName} onChange={e=>setTsName(e.target.value)} placeholder="e.g. Montana" dir="auto"/></Field>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <Field label="Current stock (m)"><input style={S.input} type="number" value={tsStock} onChange={e=>setTsStock(e.target.value)} placeholder="0"/></Field>
+            <Field label="Min threshold (m)"><input style={S.input} type="number" value={tsMin} onChange={e=>setTsMin(e.target.value)} placeholder="0"/></Field>
+          </div>
+          <Field label="Notes (optional)"><input style={S.input} value={tsNotes} onChange={e=>setTsNotes(e.target.value)}/></Field>
+          <button style={S.btnPrimary} onClick={saveTextileStockItem}>Save item</button>
+        </Modal>
+      )}
+      {editTS&&(
+        <Modal title="Edit stock item" onClose={()=>{setEditTS(null);resetTsF()}}>
+          <Field label="Textile code"><input style={S.input} value={tsCode} onChange={e=>setTsCode(e.target.value)} dir="auto"/></Field>
+          <Field label="Textile name"><input style={S.input} value={tsName} onChange={e=>setTsName(e.target.value)} dir="auto"/></Field>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <Field label="Current stock (m)"><input style={S.input} type="number" value={tsStock} onChange={e=>setTsStock(e.target.value)}/></Field>
+            <Field label="Min threshold (m)"><input style={S.input} type="number" value={tsMin} onChange={e=>setTsMin(e.target.value)}/></Field>
+          </div>
+          <Field label="Notes"><input style={S.input} value={tsNotes} onChange={e=>setTsNotes(e.target.value)}/></Field>
+          <button style={S.btnPrimary} onClick={saveTextileStockItem}>Save changes</button>
+        </Modal>
+      )}
+
+      {/* ── MANUAL STOCK LOG MODAL ────────────────────── */}
+      {showLogM&&(
+        <Modal title="Log stock movement" onClose={()=>{setShowLogM(false);setLogItemId(null);setLogQty("");setLogNote("")}}>
+          <Field label="Type">
+            <div style={{display:"flex",gap:8}}>
+              {(["thread","textile-stock"] as const).map(t=>(
+                <button key={t} onClick={()=>setLogType(t)}
+                  style={{...S.btnSm,flex:1,background:logType===t?"#7F77DD":"transparent",
+                    color:logType===t?"#fff":"#888",border:logType===t?"none":"0.5px solid #d5d5d5"}}>
+                  {t==="thread"?"🪡 Thread":"📦 Textile"}
+                </button>
+              ))}
+            </div>
+          </Field>
+          <Field label={logType==="thread"?"Thread":"Textile stock item"}>
+            <select style={S.input} value={logItemId??""} onChange={e=>setLogItemId(Number(e.target.value)||null)}>
+              <option value="">— select —</option>
+              {logType==="thread"
+                ? threads.map(t=><option key={t.id} value={t.id}>{t.code}{t.name?" — "+t.name:""}</option>)
+                : textileStock.map(t=><option key={t.id} value={t.id}>{t.textileCode}{t.textileName?" — "+t.textileName:""}</option>)
+              }
+            </select>
+          </Field>
+          <Field label="Direction">
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setLogDir("in")} style={{...S.btnSm,flex:1,
+                background:logDir==="in"?"#639922":"transparent",color:logDir==="in"?"#fff":"#888",
+                border:logDir==="in"?"none":"0.5px solid #d5d5d5"}}>+ In (received)</button>
+              <button onClick={()=>setLogDir("out")} style={{...S.btnSm,flex:1,
+                background:logDir==="out"?"#E24B4A":"transparent",color:logDir==="out"?"#fff":"#888",
+                border:logDir==="out"?"none":"0.5px solid #d5d5d5"}}>− Out (used/delivered)</button>
+            </div>
+          </Field>
+          <Field label={logType==="thread"?"Quantity (kg)":"Quantity (m)"}>
+            <input style={S.input} type="number" value={logQty} onChange={e=>setLogQty(e.target.value)} placeholder="0"/>
+          </Field>
+          <Field label="Note (optional)">
+            <input style={S.input} value={logNote} onChange={e=>setLogNote(e.target.value)} placeholder="e.g. Received from supplier / Delivered to client"/>
+          </Field>
+          <button style={S.btnPrimary} onClick={submitManualLog}>Log movement</button>
+        </Modal>
+      )}
+
+      {/* ── WARP DONE DEDUCTION MODAL ─────────────────── */}
+      {warpDoneGroup&&(
+        <Modal title="🔒 Warp done — log thread usage" onClose={()=>setWarpDoneGroup(null)}>
+          <div style={{fontSize:13,color:"#555",marginBottom:16,lineHeight:1.6}}>
+            Warp <strong>{warpDoneGroup.label}</strong> on <strong>{warpDoneGroup.machine}</strong> is being sealed.<br/>
+            Optionally log how much thread was consumed for this warp.
+          </div>
+          <Field label="Thread used (optional)">
+            <select style={S.input} value={warpDoneThreadId??""} onChange={e=>setWarpDoneThreadId(Number(e.target.value)||null)}>
+              <option value="">— skip thread logging —</option>
+              {threads.map(t=>(
+                <option key={t.id} value={t.id}>{t.code}{t.name?" — "+t.name:""} ({t.stockKg}kg in stock)</option>
+              ))}
+            </select>
+          </Field>
+          {warpDoneThreadId&&(
+            <Field label="Amount consumed (kg)">
+              <input style={S.input} type="number" value={warpDoneKg} onChange={e=>setWarpDoneKg(e.target.value)} placeholder="e.g. 12.5"/>
+            </Field>
+          )}
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <button style={S.btnPrimary} onClick={confirmWarpDone}>
+              {warpDoneThreadId&&warpDoneKg?"✓ Seal warp & deduct thread":"✓ Seal warp"}
+            </button>
+            <button style={S.btnSm} onClick={()=>setWarpDoneGroup(null)}>Cancel</button>
+          </div>
         </Modal>
       )}
     </div>
