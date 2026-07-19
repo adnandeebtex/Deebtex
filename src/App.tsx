@@ -324,6 +324,19 @@ function sanitizeTextileStock(row: Record<string, unknown>): TextileStock {
   }
 }
 
+function sanitizeTextile(row: Record<string, unknown>): Textile {
+  return {
+    id:                Number(row.id),
+    // support old rows that only have "name" — treat it as code
+    code:              String(row.code ?? row.name ?? ""),
+    name:              String(row.name ?? ""),
+    color:             String(row.color ?? ""),
+    fabricType:        String(row.fabricType ?? ""),
+    machineCategories: (row.machineCategories as MachineCategory[]) ?? [],
+    notes:             String(row.notes ?? ""),
+  }
+}
+
 async function dbLoadOrders(): Promise<Order[]> {
   const rows = await dbLoadRaw<Record<string, unknown>>("orders")
   return rows.map(sanitizeOrder)
@@ -333,7 +346,8 @@ async function dbLoadMachines(): Promise<Machine[]> {
   return rows.map(sanitizeMachine)
 }
 async function dbLoadTextiles(): Promise<Textile[]> {
-  return dbLoadRaw<Textile>("textiles")
+  const rows = await dbLoadRaw<Record<string, unknown>>("textiles")
+  return rows.map(sanitizeTextile)
 }
 async function dbLoadThreads(): Promise<Thread[]> {
   const rows = await dbLoadRaw<Record<string, unknown>>("threads")
@@ -1891,10 +1905,40 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     {id:"suggestions",   icon:"💡", label:"Suggestions"},
   ]
 
+  // ── LOADING GATE ──────────────────────────────────────────
+  // Show a proper loading screen instead of empty dashboard while
+  // Supabase data is fetching. Prevents the "everything disappeared"
+  // panic on slow connections.
+  if (!ready) {
+    return (
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center",
+        justifyContent:"center",height:"100vh",background:"#F7F6F3",
+        fontFamily:"'DM Sans','Segoe UI',system-ui,sans-serif",gap:16}}>
+        <div style={{width:44,height:44,borderRadius:10,background:"#7F77DD",
+          display:"flex",alignItems:"center",justifyContent:"center",
+          color:"#EEEDFE",fontWeight:700,fontSize:18}}>Dt</div>
+        <div style={{fontSize:14,color:"#aaa"}}>Loading your factory data…</div>
+        <div style={{
+          width:180,height:3,background:"#e5e5e5",borderRadius:2,overflow:"hidden",
+        }}>
+          <div style={{
+            height:"100%",background:"#7F77DD",borderRadius:2,
+            animation:"dtx-load 1.4s ease-in-out infinite",
+            width:"40%",
+          }}/>
+        </div>
+        <style>{`
+          @keyframes dtx-load {
+            0%   { margin-left: -40%; }
+            100% { margin-left: 140%; }
+          }
+        `}</style>
+      </div>
+    )
+  }
+
   return (
     <div style={S.shell}>
-
-      {/* ── SIDEBAR ─────────────────────────────────────── */}
       <div style={S.sidebar}>
         <div style={S.logo}>Dt</div>
         {NAV.map(n => (
