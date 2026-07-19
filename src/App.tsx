@@ -116,7 +116,93 @@ function LoginScreen({ onLogin }: { onLogin: (s: Session) => void }) {
   )
 }
 
-// ─── ROOT: session gate ───────────────────────────────────────
+// ─── TEXTILE STOCK PICKER ─────────────────────────────────────
+// Reusable searchable picker for selecting a textile from the DB
+// Used in the textile stock modal — same UX as the order form picker
+type TSPickerProps = {
+  textiles: Textile[]
+  selectedCode: string
+  selectedName: string
+  onPick: (code: string, name: string) => void
+  onClear: () => void
+}
+function TextileStockPicker({ textiles, selectedCode, selectedName, onPick, onClear }: TSPickerProps) {
+  const [search, setSearch] = useState("")
+  const [open,   setOpen]   = useState(false)
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return textiles.slice(0, 10)
+    const q = search.toLowerCase()
+    return textiles.filter(t =>
+      t.code.toLowerCase().includes(q) ||
+      t.name.toLowerCase().includes(q) ||
+      t.color.toLowerCase().includes(q) ||
+      t.fabricType.toLowerCase().includes(q)
+    ).slice(0, 20)
+  }, [textiles, search])
+
+  if (selectedCode) {
+    return (
+      <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 12px",
+        border:"1.5px solid #7F77DD", borderRadius:8, background:"#F3F2FD" }}>
+        <div style={{ flex:1 }}>
+          <div style={{ fontSize:13, fontWeight:500 }} dir="auto">
+            {selectedCode}{selectedName ? ` — ${selectedName}` : ""}
+          </div>
+        </div>
+        <button style={{ background:"none", border:"none", cursor:"pointer",
+          fontSize:12, color:"#7F77DD" }} onClick={onClear}>✕ change</button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ position:"relative" }}>
+      <div style={{ position:"relative", display:"flex", alignItems:"center" }}>
+        <span style={{ position:"absolute", left:10, fontSize:13, color:"#aaa", pointerEvents:"none" }}>🔍</span>
+        <input
+          style={{ ...S.input, paddingLeft:32 }}
+          placeholder={textiles.length===0 ? "No textiles in database yet" : `Search ${textiles.length} textiles…`}
+          value={search}
+          onChange={e => { setSearch(e.target.value); setOpen(true) }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setTimeout(() => setOpen(false), 150)}
+          disabled={textiles.length===0}
+          dir="auto"
+        />
+        {search && (
+          <button style={{ position:"absolute", right:8, background:"none", border:"none",
+            cursor:"pointer", color:"#aaa", fontSize:14 }}
+            onClick={() => { setSearch(""); setOpen(false) }}>✕</button>
+        )}
+      </div>
+      {open && textiles.length>0 && (
+        <div style={{ position:"absolute", top:"calc(100% + 4px)", left:0, right:0, zIndex:60,
+          background:"#fff", border:"0.5px solid #e0e0e0", borderRadius:8,
+          boxShadow:"0 4px 16px rgba(0,0,0,0.10)", maxHeight:220, overflowY:"auto" }}>
+          {filtered.length===0
+            ? <div style={{ padding:"12px 14px", fontSize:13, color:"#bbb" }}>No match found</div>
+            : filtered.map(t => (
+                <div key={t.id}
+                  onMouseDown={() => { onPick(t.code, t.name); setSearch(""); setOpen(false) }}
+                  style={{ padding:"9px 14px", cursor:"pointer", borderBottom:"0.5px solid #f5f5f5",
+                    display:"flex", alignItems:"center", gap:10 }}
+                  onMouseEnter={e => (e.currentTarget.style.background="#F3F2FD")}
+                  onMouseLeave={e => (e.currentTarget.style.background="transparent")}>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontSize:13, fontWeight:500 }} dir="auto">
+                      {t.code}{t.name ? ` — ${t.name}` : ""}
+                    </div>
+                    <div style={{ fontSize:11, color:"#888" }}>{t.fabricType} · {t.color}</div>
+                  </div>
+                </div>
+              ))
+          }
+        </div>
+      )}
+    </div>
+  )
+}
 // This wraps the entire app. If no session → show login screen.
 // Once logged in → show the full app. Session persists across refreshes.
 export default function Root() {
@@ -3122,25 +3208,55 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       {/* ── TEXTILE STOCK MODAL ───────────────────────── */}
       {showTSM&&(
         <Modal title="New stock item" onClose={()=>{setShowTSM(false);resetTsF()}}>
-          <Field label="Textile code"><input style={S.input} value={tsCode} onChange={e=>setTsCode(e.target.value)} placeholder="e.g. 1138/01/01" dir="auto"/></Field>
-          <Field label="Textile name (optional)"><input style={S.input} value={tsName} onChange={e=>setTsName(e.target.value)} placeholder="e.g. Montana" dir="auto"/></Field>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-            <Field label="Current stock (m)"><input style={S.input} type="number" value={tsStock} onChange={e=>setTsStock(e.target.value)} placeholder="0"/></Field>
-            <Field label="Min threshold (m)"><input style={S.input} type="number" value={tsMin} onChange={e=>setTsMin(e.target.value)} placeholder="0"/></Field>
+          <Field label="Textile">
+            <TextileStockPicker
+              textiles={textiles}
+              selectedCode={tsCode}
+              selectedName={tsName}
+              onPick={(code,name)=>{ setTsCode(code); setTsName(name) }}
+              onClear={()=>{ setTsCode(""); setTsName("") }}
+            />
+          </Field>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginTop:4}}>
+            <Field label="Current stock (m)">
+              <input style={S.input} type="number" value={tsStock} onChange={e=>setTsStock(e.target.value)} placeholder="0"/>
+            </Field>
+            <Field label="Min threshold (m)">
+              <input style={S.input} type="number" value={tsMin} onChange={e=>setTsMin(e.target.value)} placeholder="0"/>
+            </Field>
           </div>
-          <Field label="Notes (optional)"><input style={S.input} value={tsNotes} onChange={e=>setTsNotes(e.target.value)}/></Field>
-          <button style={S.btnPrimary} onClick={saveTextileStockItem}>Save item</button>
+          <Field label="Notes (optional)">
+            <input style={S.input} value={tsNotes} onChange={e=>setTsNotes(e.target.value)} placeholder="e.g. Warehouse shelf B3"/>
+          </Field>
+          <button
+            style={{...S.btnPrimary, opacity:(!tsCode.trim()||!tsStock)?0.5:1}}
+            onClick={saveTextileStockItem}>
+            Save item
+          </button>
         </Modal>
       )}
       {editTS&&(
         <Modal title="Edit stock item" onClose={()=>{setEditTS(null);resetTsF()}}>
-          <Field label="Textile code"><input style={S.input} value={tsCode} onChange={e=>setTsCode(e.target.value)} dir="auto"/></Field>
-          <Field label="Textile name"><input style={S.input} value={tsName} onChange={e=>setTsName(e.target.value)} dir="auto"/></Field>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-            <Field label="Current stock (m)"><input style={S.input} type="number" value={tsStock} onChange={e=>setTsStock(e.target.value)}/></Field>
-            <Field label="Min threshold (m)"><input style={S.input} type="number" value={tsMin} onChange={e=>setTsMin(e.target.value)}/></Field>
+          <Field label="Textile">
+            <TextileStockPicker
+              textiles={textiles}
+              selectedCode={tsCode}
+              selectedName={tsName}
+              onPick={(code,name)=>{ setTsCode(code); setTsName(name) }}
+              onClear={()=>{ setTsCode(""); setTsName("") }}
+            />
+          </Field>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginTop:4}}>
+            <Field label="Current stock (m)">
+              <input style={S.input} type="number" value={tsStock} onChange={e=>setTsStock(e.target.value)}/>
+            </Field>
+            <Field label="Min threshold (m)">
+              <input style={S.input} type="number" value={tsMin} onChange={e=>setTsMin(e.target.value)}/>
+            </Field>
           </div>
-          <Field label="Notes"><input style={S.input} value={tsNotes} onChange={e=>setTsNotes(e.target.value)}/></Field>
+          <Field label="Notes">
+            <input style={S.input} value={tsNotes} onChange={e=>setTsNotes(e.target.value)}/>
+          </Field>
           <button style={S.btnPrimary} onClick={saveTextileStockItem}>Save changes</button>
         </Modal>
       )}
