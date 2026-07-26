@@ -291,8 +291,8 @@ type Machine = {
 }
 type Order   = {
   id: number
-  textileCode: string    // e.g. "1138/01/01" — the code you type when adding an order
-  textileName: string    // e.g. "Montana" — auto-filled from textile DB when matched
+  textileCode: string
+  textileName: string
   color: string; fabricType: string
   quantity: number; deadline: string; priority: Priority
   machineCategories: MachineCategory[]
@@ -301,6 +301,7 @@ type Order   = {
   forcedMachineId?: number
   warpClosed?: boolean
   warpGroupId?: string
+  completedAt?: string   // ISO timestamp — set when order is marked done
 }
 // A saved textile definition
 type Textile = {
@@ -360,6 +361,7 @@ function sanitizeOrder(row: Record<string, unknown>): Order {
     orderNumber:       row.orderNumber ? String(row.orderNumber) : undefined,
     forcedMachineId:   row.forcedMachineId != null ? Number(row.forcedMachineId) : undefined,
     warpClosed:        row.warpClosed === true,
+    completedAt:       row.completedAt ? String(row.completedAt) : undefined,
   }
 }
 
@@ -1657,9 +1659,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   }
 
   async function warpGroupDone(orderIds: number[]) {
+    const now = new Date().toISOString()
     const updated = orders.map(o => {
       if (!orderIds.includes(o.id)) return o
-      return { ...o, warpStatus: "done" as WarpStatus, warpClosed: true }
+      return { ...o, warpStatus: "done" as WarpStatus, warpClosed: true, completedAt: now }
     })
     setOrders(updated)
     for (const o of updated.filter(o => orderIds.includes(o.id))) {
@@ -1736,7 +1739,12 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   async function setWarpSt(id: number, st: WarpStatus) {
     const updated = orders.map(o => {
       if (o.id !== id) return o
-      return { ...o, warpStatus: st }
+      return {
+        ...o,
+        warpStatus: st,
+        // stamp when marked done, clear when moved back to active
+        completedAt: st === "done" ? new Date().toISOString() : undefined,
+      }
     })
     setOrders(updated)
     const changed = updated.find(o => o.id === id)
@@ -2633,6 +2641,14 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                           )}
                           {o.notes&&<div style={{fontSize:11,color:"#bbb",marginTop:2,fontStyle:"italic"}}>{o.notes}</div>}
                           {o.orderNumber&&<div style={{fontSize:11,color:"#9ca3af",marginTop:2,fontWeight:500}}>#{o.orderNumber}</div>}
+                          {o.completedAt&&(
+                            <div style={{fontSize:11,marginTop:3,color:"#639922",fontWeight:500}}>
+                              ✓ Completed {new Date(o.completedAt).toLocaleDateString("en-GB",{
+                                day:"2-digit", month:"short", year:"numeric",
+                                hour:"2-digit", minute:"2-digit"
+                              })}
+                            </div>
+                          )}
                         </div>
                         <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
                           <Badge text="Done" color="#639922"/>
@@ -2641,7 +2657,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                           {/* restore button — move back to active if marked done by mistake */}
                           <button
                             onClick={async ()=>{
-                              const restored = {...o, warpStatus:"not-started" as WarpStatus}
+                              const restored = {...o, warpStatus:"not-started" as WarpStatus, completedAt:undefined}
                               setOrders(p=>p.map(x=>x.id===o.id?restored:x))
                               await dbUpsert("orders", restored as unknown as Record<string,unknown>)
                             }}
