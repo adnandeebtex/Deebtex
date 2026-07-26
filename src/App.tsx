@@ -653,6 +653,13 @@ function dlWarn(d: string)       {
 
 // ─── GLOBAL CSS ──────────────────────────────────────────────
 if (!document.getElementById("dtx-css")) {
+  // ensure proper mobile viewport
+  if (!document.querySelector("meta[name=viewport]")) {
+    const meta = document.createElement("meta")
+    meta.name = "viewport"
+    meta.content = "width=device-width, initial-scale=1, maximum-scale=1"
+    document.head.appendChild(meta)
+  }
   const t = document.createElement("style")
   t.id = "dtx-css"
   t.textContent = `
@@ -661,6 +668,94 @@ if (!document.getElementById("dtx-css")) {
     input,select,textarea,button{font-family:inherit}
     ::-webkit-scrollbar{width:6px}
     ::-webkit-scrollbar-thumb{background:#d0d0d0;border-radius:3px}
+
+    /* ── MOBILE LAYOUT ─────────────────────────────── */
+    @media (max-width: 768px) {
+
+      /* Shell: stack vertically, sidebar moves to bottom */
+      .dtx-shell { flex-direction: column !important; height: 100dvh !important; }
+
+      /* Sidebar becomes bottom tab bar */
+      .dtx-sidebar {
+        width: 100% !important;
+        height: 56px !important;
+        flex-direction: row !important;
+        padding: 0 4px !important;
+        gap: 0 !important;
+        order: 2;
+        border-top: 0.5px solid #2e2e3a;
+        overflow-x: auto;
+        justify-content: space-around;
+        align-items: center;
+        flex-shrink: 0 !important;
+      }
+
+      /* Hide logo and machine list in bottom bar */
+      .dtx-logo { display: none !important; }
+      .dtx-sb-machines { display: none !important; }
+
+      /* Nav buttons: vertical icon+label, compact */
+      .dtx-navbtn {
+        flex-direction: column !important;
+        gap: 2px !important;
+        padding: 6px 8px !important;
+        font-size: 10px !important;
+        align-items: center !important;
+        border-radius: 8px !important;
+        min-width: 44px !important;
+        flex: 1 !important;
+      }
+      .dtx-navbtn span:first-child { font-size: 18px !important; width: auto !important; }
+
+      /* Main: takes full height minus bottom bar */
+      .dtx-main { flex: 1 !important; overflow: hidden !important; order: 1; }
+
+      /* Topbar: wrap to two rows, smaller */
+      .dtx-topbar {
+        flex-wrap: wrap !important;
+        height: auto !important;
+        padding: 8px 12px !important;
+        gap: 6px !important;
+      }
+      .dtx-view-title { width: 100% !important; font-size: 16px !important; }
+      .dtx-search { width: 100% !important; }
+      .dtx-search input { width: 100% !important; }
+
+      /* Hide less-used topbar buttons on mobile, keep + Add order */
+      .dtx-topbar-secondary { display: none !important; }
+
+      /* Two-col becomes one col */
+      .dtx-twocol { grid-template-columns: 1fr !important; }
+
+      /* Metrics: 2x2 grid */
+      .dtx-metrics { grid-template-columns: 1fr 1fr !important; }
+
+      /* viewPad: smaller padding */
+      .dtx-viewpad { padding: 10px !important; }
+
+      /* Modal: full screen on mobile */
+      .dtx-modal {
+        width: 100% !important;
+        max-width: 100% !important;
+        max-height: 100vh !important;
+        border-radius: 0 !important;
+        margin: 0 !important;
+        height: 100dvh !important;
+      }
+      .dtx-overlay {
+        align-items: flex-start !important;
+        padding: 0 !important;
+      }
+
+      /* Card head: allow wrapping */
+      .dtx-chead { flex-wrap: wrap !important; gap: 6px !important; }
+
+      /* Order rows: tighter */
+      .dtx-orow { gap: 6px !important; }
+
+      /* warp group search: full width */
+      .dtx-warp-search input { width: 140px !important; }
+    }
   `
   document.head.appendChild(t)
 }
@@ -668,8 +763,8 @@ if (!document.getElementById("dtx-css")) {
 // ─── SHARED UI ───────────────────────────────────────────────
 function Modal({ title, onClose, children }: { title:string; onClose:()=>void; children:React.ReactNode }) {
   return (
-    <div style={S.overlay} onClick={onClose}>
-      <div style={S.modal} onClick={e => e.stopPropagation()}>
+    <div style={S.overlay} className="dtx-overlay" onClick={onClose}>
+      <div style={S.modal} className="dtx-modal" onClick={e => e.stopPropagation()}>
         <div style={S.mHead}>
           <span style={S.mTitle}>{title}</span>
           <button style={S.closeBtn} onClick={onClose}>✕</button>
@@ -2032,11 +2127,12 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   }
 
   return (
-    <div style={S.shell}>
-      <div style={S.sidebar}>
-        <div style={S.logo}>Dt</div>
+    <div style={S.shell} className="dtx-shell">
+      <div style={S.sidebar} className="dtx-sidebar">
+        <div style={S.logo} className="dtx-logo">Dt</div>
         {NAV.map(n => (
           <button key={n.id}
+            className="dtx-navbtn"
             style={{...S.navBtn,...(view===n.id?S.navActive:{})}}
             onClick={()=>setView(n.id)}>
             <span style={{fontSize:16,width:18,textAlign:"center"}}>{n.icon}</span>
@@ -2045,7 +2141,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         ))}
         <div style={{flex:1}}/>
         {machines.length>0 && (
-          <div style={{borderTop:"0.5px solid #2e2e3a",paddingTop:10,marginTop:8}}>
+          <div className="dtx-sb-machines" style={{borderTop:"0.5px solid #2e2e3a",paddingTop:10,marginTop:8}}>
             {machines.slice(0,7).map(m=>(
               <div key={m.id} style={{display:"flex",alignItems:"center",gap:8,padding:"3px 10px"}}>
                 {m.outOfOrder
@@ -2064,33 +2160,35 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       </div>
 
       {/* ── MAIN ────────────────────────────────────────── */}
-      <div style={S.main}>
+      <div style={S.main} className="dtx-main">
 
         {/* TOPBAR */}
-        <div style={S.topbar}>
-          <span style={{fontWeight:500,fontSize:15,flex:1}}>
+        <div style={S.topbar} className="dtx-topbar">
+          <span style={{fontWeight:500,fontSize:15,flex:1}} className="dtx-view-title">
             {NAV.find(n=>n.id===view)?.label}
           </span>
-          <div style={{position:"relative",display:"flex",alignItems:"center"}}>
+          <div style={{position:"relative",display:"flex",alignItems:"center"}} className="dtx-search">
             <span style={{position:"absolute",left:9,fontSize:12,pointerEvents:"none"}}>🔍</span>
             <input style={S.search} placeholder="Search orders…" value={search} onChange={e=>setSearch(e.target.value)}/>
           </div>
           {/* hidden file input for restore */}
           <input id="restore-input" type="file" accept=".json" style={{display:"none"}}
             onChange={e=>{ if(e.target.files?.[0]) importBackup(e.target.files[0]); e.target.value="" }}/>
-          <button style={{...S.btnSm,background:"#EDFBEE",color:"#166534",border:"0.5px solid #86EFAC"}}
-            onClick={exportBackup} title="Download full backup of all data">
-            💾 Backup
-          </button>
-          <button style={{...S.btnSm,color:"#888"}}
-            onClick={()=>document.getElementById("restore-input")?.click()}
-            title="Restore from a backup file">
-            📂 Restore
-          </button>
-          <button style={S.btnSm} onClick={exportCSV}>CSV</button>
-          <button style={S.btnSm} onClick={()=>{resetMF();setShowMM(true)}}>+ Machine</button>
-          <button style={S.btnSm} onClick={()=>{resetTF();setShowTM(true)}}>+ Textile</button>
-          <button style={S.btnPrimary} onClick={()=>{resetOF();setShowOM(true)}}>+ Add order</button>
+          <div style={{display:"flex",gap:6,alignItems:"center"}} className="dtx-topbar-secondary">
+            <button style={{...S.btnSm,background:"#EDFBEE",color:"#166534",border:"0.5px solid #86EFAC"}}
+              onClick={exportBackup} title="Download full backup of all data">
+              💾 Backup
+            </button>
+            <button style={{...S.btnSm,color:"#888"}}
+              onClick={()=>document.getElementById("restore-input")?.click()}
+              title="Restore from a backup file">
+              📂 Restore
+            </button>
+            <button style={S.btnSm} onClick={exportCSV}>CSV</button>
+            <button style={S.btnSm} onClick={()=>{resetMF();setShowMM(true)}}>+ Machine</button>
+            <button style={S.btnSm} onClick={()=>{resetTF();setShowTM(true)}}>+ Textile</button>
+          </div>
+          <button style={S.btnPrimary} onClick={()=>{resetOF();setShowOM(true)}}>+ Order</button>
           <button
             onClick={onLogout}
             style={{...S.btnSm,color:"#E24B4A",border:"0.5px solid #fca5a5",marginLeft:4}}
@@ -2101,8 +2199,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
         {/* ── DASHBOARD VIEW ────────────────────────────── */}
         {view==="dashboard" && (
-          <div style={S.viewPad}>
-            <div style={S.metrics}>
+          <div style={S.viewPad} className="dtx-viewpad">
+            <div style={S.metrics} className="dtx-metrics">
               {[
                 {label:"Active orders", val:activeCount,                    sub:`${highCnt} high priority`},
                 {label:"Remaining load",val:`${totalLoad.toLocaleString()}m`,sub:`${doneLoad.toLocaleString()}m produced`},
@@ -2132,10 +2230,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               </div>
             ))}
 
-            <div style={S.twoCol}>
+            <div style={S.twoCol} className="dtx-twocol">
               {/* schedule card */}
               <div style={S.card}>
-                <div style={S.cHead}><span style={S.cTitle}>Machine schedule</span><span style={S.cSub}>active warp + queue · use arrows to reorder</span></div>
+                <div style={S.cHead} className="dtx-chead"><span style={S.cTitle}>Machine schedule</span><span style={S.cSub}>active warp + queue · use arrows to reorder</span></div>
                 <div style={S.cBody}>
                   {machines.length===0 && <div style={S.empty}>No machines yet.</div>}
                   {machines.map(m=>{
@@ -2259,7 +2357,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
               {/* warp groups card */}
               <div style={S.card}>
-                <div style={S.cHead}>
+                <div style={S.cHead} className="dtx-chead">
                   <span style={S.cTitle}>Warp groups</span>
                   <span style={S.cSub}>{Object.keys(warpGroups).length} total</span>
                   <div style={{position:"relative",display:"flex",alignItems:"center",marginLeft:"auto"}}>
@@ -2351,9 +2449,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
         {/* ── ORDERS VIEW ───────────────────────────────── */}
         {view==="orders" && (
-          <div style={S.viewPad}>
+          <div style={S.viewPad} className="dtx-viewpad">
             <div style={S.card}>
-              <div style={S.cHead}>
+              <div style={S.cHead} className="dtx-chead">
                 <span style={S.cTitle}>Active orders</span>
                 <span style={S.cSub}>{filteredOrders.length} shown · done in History</span>
                 {/* sort controls */}
@@ -2387,7 +2485,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                   const warn  = dlWarn(o.deadline)
                   const assignedMachine = machines.find(m => (schedule[m.id]??[]).some(x => x.id === o.id))
                   return (
-                    <div key={o.id} style={S.oRow}>
+                    <div key={o.id} style={S.oRow} className="dtx-orow">
                       <div style={{width:6,height:6,borderRadius:"50%",background:priColor(o.priority),marginTop:5,flexShrink:0}}/>
                       <div style={{flex:1}}>
                         <div style={{fontSize:14,fontWeight:500}}>{orderLabel(o)}</div>
@@ -2427,9 +2525,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
         {/* ── MACHINES VIEW ─────────────────────────────── */}
         {view==="machines" && (
-          <div style={S.viewPad}>
+          <div style={S.viewPad} className="dtx-viewpad">
             <div style={S.card}>
-              <div style={S.cHead}>
+              <div style={S.cHead} className="dtx-chead">
                 <span style={S.cTitle}>Machines</span>
                 <button style={S.btnSm} onClick={()=>{resetMF();setShowMM(true)}}>+ Add machine</button>
               </div>
@@ -2490,10 +2588,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
         {/* ── ANALYTICS VIEW ────────────────────────────── */}
         {view==="analytics" && (
-          <div style={S.viewPad}>
-            <div style={S.twoCol}>
+          <div style={S.viewPad} className="dtx-viewpad">
+            <div style={S.twoCol} className="dtx-twocol">
               <div style={S.card}>
-                <div style={S.cHead}><span style={S.cTitle}>Machine load</span></div>
+                <div style={S.cHead} className="dtx-chead"><span style={S.cTitle}>Machine load</span></div>
                 <div style={S.cBody}>
                   {machines.length===0&&<div style={S.empty}>No machines yet.</div>}
                   {machines.map(m=>{
@@ -2511,7 +2609,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               </div>
 
               <div style={S.card}>
-                <div style={S.cHead}><span style={S.cTitle}>Priority breakdown</span></div>
+                <div style={S.cHead} className="dtx-chead"><span style={S.cTitle}>Priority breakdown</span></div>
                 <div style={S.cBody}>
                   {(["High","Normal","Low"] as Priority[]).map(p=>{
                     const cnt=orders.filter(o=>o.priority===p).length
@@ -2529,7 +2627,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               </div>
 
               <div style={S.card}>
-                <div style={S.cHead}><span style={S.cTitle}>Warp status</span></div>
+                <div style={S.cHead} className="dtx-chead"><span style={S.cTitle}>Warp status</span></div>
                 <div style={S.cBody}>
                   {(["not-started","on-machine","done"] as WarpStatus[]).map(st=>{
                     const cnt=orders.filter(o=>o.warpStatus===st).length
@@ -2548,7 +2646,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               </div>
 
               <div style={S.card}>
-                <div style={S.cHead}><span style={S.cTitle}>Orders per category</span></div>
+                <div style={S.cHead} className="dtx-chead"><span style={S.cTitle}>Orders per category</span></div>
                 <div style={S.cBody}>
                   {CATS.map(cat=>{
                     const cnt=orders.filter(o=>(o.machineCategories??[]).includes(cat)).length
@@ -2584,7 +2682,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             : doneOrders
           const totalDoneMeters = doneOrders.reduce((s,o)=>s+o.quantity,0)
           return (
-            <div style={S.viewPad}>
+            <div style={S.viewPad} className="dtx-viewpad">
               {/* summary strip */}
               <div style={{display:"flex",gap:12,marginBottom:16}}>
                 <div style={S.mCard}>
@@ -2598,7 +2696,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               </div>
 
               <div style={S.card}>
-                <div style={S.cHead}>
+                <div style={S.cHead} className="dtx-chead">
                   <span style={S.cTitle}>Completed orders</span>
                   <span style={S.cSub}>{filtered.length} shown</span>
                   {/* search inside history */}
@@ -2810,7 +2908,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             )
 
           return (
-            <div style={S.viewPad}>
+            <div style={S.viewPad} className="dtx-viewpad">
               <div style={{marginBottom:16}}>
                 <div style={{fontSize:18,fontWeight:600,marginBottom:4}}>💡 Smart Suggestions</div>
                 <div style={{fontSize:13,color:"#888"}}>
@@ -2889,9 +2987,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
         {/* ── THREADS VIEW ──────────────────────────────── */}
         {view==="threads" && (
-          <div style={S.viewPad}>
+          <div style={S.viewPad} className="dtx-viewpad">
             <div style={S.card}>
-              <div style={S.cHead}>
+              <div style={S.cHead} className="dtx-chead">
                 <span style={S.cTitle}>Thread stock</span>
                 <span style={S.cSub}>{threads.length} threads</span>
                 <button style={{...S.btnSm,marginLeft:"auto"}} onClick={()=>{resetThF();setShowThM(true)}}>+ Add thread</button>
@@ -2962,9 +3060,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
         {/* ── TEXTILE STOCK VIEW ────────────────────────── */}
         {view==="textile-stock" && (
-          <div style={S.viewPad}>
+          <div style={S.viewPad} className="dtx-viewpad">
             <div style={S.card}>
-              <div style={S.cHead}>
+              <div style={S.cHead} className="dtx-chead">
                 <span style={S.cTitle}>Finished textile stock</span>
                 <span style={S.cSub}>{textileStock.length} items</span>
                 <button style={{...S.btnSm,marginLeft:"auto"}} onClick={()=>{resetTsF();setShowTSM(true)}}>+ Add stock item</button>
@@ -3034,9 +3132,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
         {/* ── TEXTILES VIEW ─────────────────────────────── */}
         {view==="textiles" && (
-          <div style={S.viewPad}>
+          <div style={S.viewPad} className="dtx-viewpad">
             <div style={S.card}>
-              <div style={S.cHead}>
+              <div style={S.cHead} className="dtx-chead">
                 <span style={S.cTitle}>Textile database</span>
                 <span style={S.cSub}>{filteredTextiles.length} / {textiles.length}</span>
                 {/* search */}
@@ -3361,7 +3459,7 @@ const S: Record<string,CSSProperties> = {
   navActive:  {background:"#1e2130",color:"#e5e7eb"},
   main:       {flex:1,display:"flex",flexDirection:"column",overflow:"hidden"},
   topbar:     {background:"#fff",borderBottom:"0.5px solid #e5e5e5",padding:"0 20px",height:52,display:"flex",alignItems:"center",gap:10,flexShrink:0},
-  search:     {padding:"6px 10px 6px 28px",border:"0.5px solid #d5d5d5",borderRadius:8,fontSize:13,background:"#f7f7f7",width:180,outline:"none"},
+  search:     {padding:"6px 10px 6px 28px",border:"0.5px solid #d5d5d5",borderRadius:8,fontSize:13,background:"#f7f7f7",width:180,outline:"none",minWidth:0,flex:"0 1 180px"},
   viewPad:    {flex:1,padding:20,overflowY:"auto"},
   twoCol:     {display:"grid",gridTemplateColumns:"1fr 1fr",gap:14},
   metrics:    {display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:16},
