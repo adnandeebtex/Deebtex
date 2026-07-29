@@ -298,6 +298,7 @@ type Order   = {
   machineCategories: MachineCategory[]
   warpStatus: WarpStatus; notes: string
   orderNumber?: string
+  orderDate?: string     // ISO date — when the order was placed
   forcedMachineId?: number
   warpClosed?: boolean
   warpGroupId?: string
@@ -359,6 +360,7 @@ function sanitizeOrder(row: Record<string, unknown>): Order {
     warpStatus:        (row.warpStatus as WarpStatus) ?? "not-started",
     notes:             String(row.notes ?? ""),
     orderNumber:       row.orderNumber ? String(row.orderNumber) : undefined,
+    orderDate:         row.orderDate   ? String(row.orderDate)   : undefined,
     forcedMachineId:   row.forcedMachineId != null ? Number(row.forcedMachineId) : undefined,
     warpClosed:        row.warpClosed === true,
     completedAt:       row.completedAt ? String(row.completedAt) : undefined,
@@ -866,7 +868,7 @@ type OFProps = {
   selectedTextileId: number|null
   textileCode:string; textileName:string; color:string; fabricType:string; quantity:string
   deadline:string; priority:Priority; categories:MachineCategory[]; notes:string
-  orderNumber:string
+  orderNumber:string; orderDate:string
   isEdit:boolean
   set: {
     selectedTextileId:(v:number|null)=>void
@@ -874,12 +876,12 @@ type OFProps = {
     color:(v:string)=>void; fabricType:(v:string)=>void
     quantity:(v:string)=>void; deadline:(v:string)=>void; priority:(v:Priority)=>void
     categories:(v:MachineCategory[])=>void; notes:(v:string)=>void
-    orderNumber:(v:string)=>void
+    orderNumber:(v:string)=>void; orderDate:(v:string)=>void
   }
   onSave:()=>void
 }
 
-function OrderFormUI({ textiles,selectedTextileId,textileCode,textileName,color,fabricType,quantity,deadline,priority,categories,notes,orderNumber,isEdit,set,onSave }: OFProps) {
+function OrderFormUI({ textiles,selectedTextileId,textileCode,textileName,color,fabricType,quantity,deadline,priority,categories,notes,orderNumber,orderDate,isEdit,set,onSave }: OFProps) {
   const fromDB = selectedTextileId !== null
   const [txSearch, setTxSearch] = useState("")
   const [txOpen,   setTxOpen]   = useState(false)
@@ -1029,7 +1031,10 @@ function OrderFormUI({ textiles,selectedTextileId,textileCode,textileName,color,
         <Field label="Quantity (m)">
           <input style={S.input} type="number" value={quantity} onChange={e=>set.quantity(e.target.value)} placeholder="500" />
         </Field>
-        <Field label="Deadline">
+        <Field label="Order date">
+          <input style={S.input} type="date" value={orderDate} onChange={e=>set.orderDate(e.target.value)}/>
+        </Field>
+        <Field label="Due date">
           <input style={S.input} type="date" value={deadline} onChange={e=>set.deadline(e.target.value)} />
         </Field>
         <Field label="Priority">
@@ -1219,6 +1224,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [oCats,    setOCats]    = useState<MachineCategory[]>([])
   const [oNotes,   setONotes]   = useState("")
   const [oOrderNum,setOOrderNum]= useState("")
+  const [oOrderDate,setOOrderDate]= useState("")
 
   const [forceSwitchOrder, setForceSwitchOrder] = useState<Order|null>(null)
   const [historySearch, setHistorySearch] = useState("")
@@ -1534,7 +1540,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   function resetOF() {
     setOSelId(null)
     setOTextileCode(""); setOTextileName(""); setOColor(""); setOFabric(""); setOQty("")
-    setODl(""); setOPri("Normal"); setOCats([]); setONotes(""); setOOrderNum("")
+    setODl(""); setOPri("Normal"); setOCats([]); setONotes(""); setOOrderNum(""); setOOrderDate("")
   }
 
   async function saveOrder() {
@@ -1547,6 +1553,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       quantity:Number(oQty), deadline:oDl, priority:oPri,
       machineCategories:oCats, warpStatus:editO?.warpStatus??"not-started", notes:oNotes,
       orderNumber: oOrderNum.trim() || undefined,
+      orderDate:   oOrderDate || undefined,
     }
     if (editO) {
       setOrders(p => p.map(o => o.id===editO.id ? data : o))
@@ -1579,7 +1586,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     setOColor(o.color); setOFabric(o.fabricType)
     setOQty(String(o.quantity)); setODl(o.deadline); setOPri(o.priority)
     setOCats(o.machineCategories ?? []); setONotes(o.notes)
-    setOOrderNum(o.orderNumber ?? ""); setEditO(o)
+    setOOrderNum(o.orderNumber ?? ""); setOOrderDate(o.orderDate ?? ""); setEditO(o)
   }
 
   async function delOrder(id: number) {
@@ -2058,14 +2065,14 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     textileCode:oTextileCode, textileName:oTextileName,
     color:oColor, fabricType:oFabric, quantity:oQty,
     deadline:oDl, priority:oPri, categories:oCats, notes:oNotes,
-    orderNumber:oOrderNum,
+    orderNumber:oOrderNum, orderDate:oOrderDate,
     isEdit:!!editO,
     set:{
       selectedTextileId:setOSelId,
       textileCode:setOTextileCode, textileName:setOTextileName,
       color:setOColor, fabricType:setOFabric,
       quantity:setOQty, deadline:setODl, priority:setOPri,
-      categories:setOCats, notes:setONotes, orderNumber:setOOrderNum,
+      categories:setOCats, notes:setONotes, orderNumber:setOOrderNum, orderDate:setOOrderDate,
     },
     onSave:saveOrder,
   }
@@ -2496,6 +2503,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                             {warn==="urgent"?"⚠️ ":""}Due {o.deadline}
                           </div>
                         )}
+                        {o.orderDate&&<div style={{fontSize:11,color:"#aaa",marginTop:2}}>📅 Ordered: {o.orderDate}</div>}
                         {o.notes&&<div style={{fontSize:11,color:"#aaa",marginTop:2,fontStyle:"italic"}}>{o.notes}</div>}
                         {o.orderNumber&&<div style={{fontSize:11,color:"#7F77DD",marginTop:2,fontWeight:500}}>#{o.orderNumber}</div>}
                         {assignedMachine&&<div style={{fontSize:11,color:"#7F77DD",marginTop:2}}>→ {assignedMachine.name}</div>}
@@ -2587,87 +2595,420 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         )}
 
         {/* ── ANALYTICS VIEW ────────────────────────────── */}
-        {view==="analytics" && (
-          <div style={S.viewPad} className="dtx-viewpad">
-            <div style={S.twoCol} className="dtx-twocol">
-              <div style={S.card}>
-                <div style={S.cHead} className="dtx-chead"><span style={S.cTitle}>Machine load</span></div>
-                <div style={S.cBody}>
-                  {machines.length===0&&<div style={S.empty}>No machines yet.</div>}
-                  {machines.map(m=>{
-                    const ld=machineLoad(schedule,m.id); const st=machineStatus(ld,m.capacity); const pc=loadPct(ld,m.capacity)
-                    return (
-                      <div key={m.id} style={{marginBottom:14}}>
-                        <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}>
-                          <span>{m.name}</span><span style={{color:statColor(st)}}>{pc}% — {st}</span>
-                        </div>
-                        <Bar pct={pc} color={statColor(st)} h={8}/>
-                      </div>
-                    )
-                  })}
-                </div>
+        {view==="analytics" && (()=>{
+          const allOrders   = orders
+          const doneOrders  = orders.filter(o => o.warpStatus === "done")
+          const activeOrds  = orders.filter(o => o.warpStatus !== "done")
+
+          // ── PRODUCTION TIME ──────────────────────────────
+          // days from orderDate → completedAt
+          const prodTimes = doneOrders
+            .filter(o => o.orderDate && o.completedAt)
+            .map(o => {
+              const start = new Date(o.orderDate!).getTime()
+              const end   = new Date(o.completedAt!).getTime()
+              return Math.round((end - start) / 86400000)
+            })
+            .filter(d => d >= 0)
+
+          const avgProdDays = prodTimes.length
+            ? Math.round(prodTimes.reduce((s,d)=>s+d,0) / prodTimes.length)
+            : null
+          const minProdDays = prodTimes.length ? Math.min(...prodTimes) : null
+          const maxProdDays = prodTimes.length ? Math.max(...prodTimes) : null
+
+          // ── ON-TIME RATE ──────────────────────────────────
+          const withDeadline = doneOrders.filter(o => o.deadline && o.completedAt)
+          const onTime = withDeadline.filter(o =>
+            new Date(o.completedAt!) <= new Date(o.deadline)
+          )
+          const onTimeRate = withDeadline.length
+            ? Math.round(onTime.length / withDeadline.length * 100)
+            : null
+
+          // ── MOST ORDERED TEXTILES (by count and by meters) ─
+          const textileCount: Record<string,{label:string;count:number;meters:number}> = {}
+          for (const o of allOrders) {
+            const key = o.textileCode
+            if (!textileCount[key]) textileCount[key] = {
+              label: o.textileCode + (o.textileName ? ` — ${o.textileName}` : ""),
+              count:0, meters:0
+            }
+            textileCount[key].count++
+            textileCount[key].meters += o.quantity
+          }
+          const topByCount  = Object.values(textileCount).sort((a,b)=>b.count-a.count).slice(0,10)
+          const topByMeters = Object.values(textileCount).sort((a,b)=>b.meters-a.meters).slice(0,10)
+
+          // ── MOST ORDERED COLOR ────────────────────────────
+          const colorCount: Record<string,number> = {}
+          for (const o of allOrders) colorCount[o.color] = (colorCount[o.color]||0) + 1
+          const topColors = Object.entries(colorCount).sort((a,b)=>b[1]-a[1]).slice(0,8)
+
+          // ── MOST ORDERED FABRIC TYPE ──────────────────────
+          const fabCount: Record<string,number> = {}
+          for (const o of allOrders) fabCount[o.fabricType] = (fabCount[o.fabricType]||0) + 1
+          const topFabrics = Object.entries(fabCount).sort((a,b)=>b[1]-a[1]).slice(0,8)
+
+          // ── MACHINE UTILIZATION ───────────────────────────
+          const machineMeters: Record<string,{name:string;meters:number;orders:number}> = {}
+          for (const m of machines) machineMeters[m.id] = {name:m.name,meters:0,orders:0}
+          for (const m of machines) {
+            for (const o of (schedule[m.id]??[])) {
+              machineMeters[m.id].meters += o.quantity
+              machineMeters[m.id].orders++
+            }
+          }
+          const machineStats = Object.values(machineMeters).sort((a,b)=>b.meters-a.meters)
+          const maxMachineM  = Math.max(...machineStats.map(m=>m.meters), 1)
+
+          // ── AVG PROD TIME PER PRIORITY ────────────────────
+          const priTimes: Record<Priority,number[]> = {High:[],Normal:[],Low:[]}
+          for (const o of doneOrders) {
+            if (!o.orderDate || !o.completedAt) continue
+            const days = Math.round((new Date(o.completedAt).getTime() - new Date(o.orderDate).getTime()) / 86400000)
+            if (days >= 0) priTimes[o.priority].push(days)
+          }
+          const avgByPri = (p: Priority) => priTimes[p].length
+            ? Math.round(priTimes[p].reduce((s,d)=>s+d,0)/priTimes[p].length)
+            : null
+
+          // ── ORDERS PER MONTH ──────────────────────────────
+          const monthCount: Record<string,{received:number;completed:number}> = {}
+          for (const o of allOrders) {
+            const d = o.orderDate || o.deadline
+            if (!d) continue
+            const key = d.slice(0,7)   // "2025-06"
+            if (!monthCount[key]) monthCount[key] = {received:0,completed:0}
+            monthCount[key].received++
+          }
+          for (const o of doneOrders) {
+            const d = o.completedAt
+            if (!d) continue
+            const key = d.slice(0,7)
+            if (!monthCount[key]) monthCount[key] = {received:0,completed:0}
+            monthCount[key].completed++
+          }
+          const months = Object.keys(monthCount).sort().slice(-12)   // last 12 months
+          const maxMonthVal = Math.max(...months.map(m=>Math.max(monthCount[m].received,monthCount[m].completed)),1)
+
+          // ── STOCK VELOCITY ────────────────────────────────
+          // threads: sum of OUT entries in last 30 days
+          const now30 = Date.now() - 30*86400000
+          const threadVelocity = threads.map(t=>{
+            const outKg = stockLog
+              .filter(l=>l.itemId===t.id&&l.itemType==="thread"&&l.direction==="out"&&new Date(l.date).getTime()>now30)
+              .reduce((s,l)=>s+(l.quantityKg||0),0)
+            return {label:t.code+(t.name?` — ${t.name}`:""),outKg}
+          }).filter(t=>t.outKg>0).sort((a,b)=>b.outKg-a.outKg).slice(0,6)
+
+          const tsVelocity = textileStock.map(ts=>{
+            const outM = stockLog
+              .filter(l=>l.itemId===ts.id&&l.itemType==="textile-stock"&&l.direction==="out"&&new Date(l.date).getTime()>now30)
+              .reduce((s,l)=>s+(l.quantityM||0),0)
+            return {label:ts.textileCode+(ts.textileName?` — ${ts.textileName}`:""),outM}
+          }).filter(t=>t.outM>0).sort((a,b)=>b.outM-a.outM).slice(0,6)
+
+          const maxTopM = Math.max(...topByMeters.map(t=>t.meters),1)
+          const maxTopC = Math.max(...topByCount.map(t=>t.count),1)
+
+          // helper: stat card
+          const StatCard = ({label,val,sub,color}:{label:string;val:string|number|null;sub?:string;color?:string})=>(
+            <div style={S.mCard}>
+              <div style={S.mLabel}>{label}</div>
+              <div style={{...S.mVal,color:color||"#1a1a1a"}}>{val??<span style={{color:"#ccc",fontSize:16}}>—</span>}</div>
+              {sub&&<div style={S.mSub}>{sub}</div>}
+            </div>
+          )
+
+          return (
+            <div style={S.viewPad} className="dtx-viewpad">
+
+              {/* ── KPI STRIP ─────────────────────────────── */}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}} className="dtx-metrics">
+                <StatCard label="Total orders" val={allOrders.length} sub={`${doneOrders.length} completed`}/>
+                <StatCard label="Avg production time" val={avgProdDays!==null?`${avgProdDays}d`:null} sub={prodTimes.length?`from ${prodTimes.length} tracked orders`:"add order dates to track"}/>
+                <StatCard label="On-time rate" val={onTimeRate!==null?`${onTimeRate}%`:null} sub={withDeadline.length?`${onTime.length}/${withDeadline.length} orders`:"need deadline+done orders"}/>
+                <StatCard label="Total meters" val={`${allOrders.reduce((s,o)=>s+o.quantity,0).toLocaleString()}m`} sub={`${doneOrders.reduce((s,o)=>s+o.quantity,0).toLocaleString()}m produced`}/>
               </div>
 
-              <div style={S.card}>
-                <div style={S.cHead} className="dtx-chead"><span style={S.cTitle}>Priority breakdown</span></div>
-                <div style={S.cBody}>
-                  {(["High","Normal","Low"] as Priority[]).map(p=>{
-                    const cnt=orders.filter(o=>o.priority===p).length
-                    const pc=orders.length?Math.round(cnt/orders.length*100):0
-                    return (
-                      <div key={p} style={{marginBottom:14}}>
-                        <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}>
-                          <span>{p}</span><span style={{color:priColor(p)}}>{cnt} ({pc}%)</span>
-                        </div>
-                        <Bar pct={pc} color={priColor(p)} h={8}/>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
+              <div style={S.twoCol} className="dtx-twocol">
 
-              <div style={S.card}>
-                <div style={S.cHead} className="dtx-chead"><span style={S.cTitle}>Warp status</span></div>
-                <div style={S.cBody}>
-                  {(["not-started","on-machine","done"] as WarpStatus[]).map(st=>{
-                    const cnt=orders.filter(o=>o.warpStatus===st).length
-                    const pc=orders.length?Math.round(cnt/orders.length*100):0
-                    const label=st==="on-machine"?"On machine":st==="done"?"Done":"Not started"
-                    return (
-                      <div key={st} style={{marginBottom:14}}>
-                        <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}>
-                          <span>{label}</span><span style={{color:warpColor(st)}}>{cnt} ({pc}%)</span>
+                {/* ── PRODUCTION TIME BY PRIORITY ───────────── */}
+                <div style={S.card}>
+                  <div style={S.cHead} className="dtx-chead">
+                    <span style={S.cTitle}>Avg production time by priority</span>
+                    <span style={S.cSub}>order date → done</span>
+                  </div>
+                  <div style={S.cBody}>
+                    {(["High","Normal","Low"] as Priority[]).map(p=>{
+                      const avg = avgByPri(p)
+                      return (
+                        <div key={p} style={{marginBottom:16}}>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}>
+                            <span style={{color:priColor(p),fontWeight:500}}>{p}</span>
+                            <span>{avg!==null?`${avg} days avg (${priTimes[p].length} orders)`:"not enough data"}</span>
+                          </div>
+                          {avg!==null&&<Bar pct={Math.min(avg/30*100,100)} color={priColor(p)} h={8}/>}
                         </div>
-                        <Bar pct={pc} color={warpColor(st)} h={8}/>
+                      )
+                    })}
+                    {avgProdDays!==null&&(
+                      <div style={{marginTop:8,padding:"10px 12px",background:"#F3F2FD",borderRadius:8,fontSize:13}}>
+                        <span style={{color:"#534AB7",fontWeight:600}}>Overall avg: {avgProdDays} days</span>
+                        <span style={{color:"#888",marginLeft:8}}>fastest: {minProdDays}d · slowest: {maxProdDays}d</span>
                       </div>
-                    )
-                  })}
-                </div>
-              </div>
-
-              <div style={S.card}>
-                <div style={S.cHead} className="dtx-chead"><span style={S.cTitle}>Orders per category</span></div>
-                <div style={S.cBody}>
-                  {CATS.map(cat=>{
-                    const cnt=orders.filter(o=>(o.machineCategories??[]).includes(cat)).length
-                    const pc=orders.length?Math.round(cnt/orders.length*100):0
-                    return (
-                      <div key={cat} style={{marginBottom:12}}>
-                        <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:4}}>
-                          <span>{cat}</span><span style={{color:"#888"}}>{cnt}</span>
-                        </div>
-                        <Bar pct={pc} color="#7F77DD" h={6}/>
-                      </div>
-                    )
-                  })}
-                  <div style={{marginTop:12,fontSize:12,color:"#aaa"}}>
-                    Total: {totalLoad.toLocaleString()}m
+                    )}
                   </div>
                 </div>
+
+                {/* ── ORDERS RECEIVED PER MONTH ─────────────── */}
+                <div style={S.card}>
+                  <div style={S.cHead} className="dtx-chead">
+                    <span style={S.cTitle}>Monthly activity</span>
+                    <span style={S.cSub}>last 12 months</span>
+                  </div>
+                  <div style={S.cBody}>
+                    {months.length===0&&<div style={S.empty}>Add order dates to see monthly trends.</div>}
+                    {months.map(m=>{
+                      const {received,completed} = monthCount[m]
+                      const label = new Date(m+"-01").toLocaleDateString("en-GB",{month:"short",year:"2-digit"})
+                      return (
+                        <div key={m} style={{marginBottom:10}}>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}>
+                            <span style={{color:"#555",fontWeight:500}}>{label}</span>
+                            <span style={{color:"#aaa"}}>{received} received · {completed} completed</span>
+                          </div>
+                          <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                            <Bar pct={Math.round(received/maxMonthVal*100)} color="#7F77DD" h={5}/>
+                            <Bar pct={Math.round(completed/maxMonthVal*100)} color="#639922" h={5}/>
+                          </div>
+                        </div>
+                      )
+                    })}
+                    {months.length>0&&(
+                      <div style={{display:"flex",gap:16,marginTop:8,fontSize:11}}>
+                        <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:5,background:"#7F77DD",borderRadius:2,display:"inline-block"}}/>Received</span>
+                        <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:5,background:"#639922",borderRadius:2,display:"inline-block"}}/>Completed</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ── TOP TEXTILES BY FREQUENCY ─────────────── */}
+                <div style={S.card}>
+                  <div style={S.cHead} className="dtx-chead">
+                    <span style={S.cTitle}>Most ordered textiles</span>
+                    <span style={S.cSub}>by number of orders</span>
+                  </div>
+                  <div style={S.cBody}>
+                    {topByCount.length===0&&<div style={S.empty}>No orders yet.</div>}
+                    {topByCount.map((t,i)=>(
+                      <div key={t.label} style={{marginBottom:10}}>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}>
+                          <span style={{fontWeight:i<3?600:400,color:i===0?"#534AB7":i<3?"#1a1a1a":"#555"}} dir="auto">
+                            {i===0?"🥇 ":i===1?"🥈 ":i===2?"🥉 ":""}{t.label}
+                          </span>
+                          <span style={{color:"#888"}}>{t.count} orders · {t.meters}m</span>
+                        </div>
+                        <Bar pct={Math.round(t.count/maxTopC*100)} color={i===0?"#534AB7":i<3?"#7F77DD":"#c4c0f0"} h={6}/>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* ── TOP TEXTILES BY METERS ────────────────── */}
+                <div style={S.card}>
+                  <div style={S.cHead} className="dtx-chead">
+                    <span style={S.cTitle}>Top textiles by volume</span>
+                    <span style={S.cSub}>total meters ordered</span>
+                  </div>
+                  <div style={S.cBody}>
+                    {topByMeters.length===0&&<div style={S.empty}>No orders yet.</div>}
+                    {topByMeters.map((t,i)=>(
+                      <div key={t.label} style={{marginBottom:10}}>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}>
+                          <span style={{fontWeight:i<3?600:400,color:i===0?"#166534":i<3?"#1a1a1a":"#555"}} dir="auto">
+                            {i===0?"🏆 ":""}{t.label}
+                          </span>
+                          <span style={{color:"#888"}}>{t.meters.toLocaleString()}m</span>
+                        </div>
+                        <Bar pct={Math.round(t.meters/maxTopM*100)} color={i===0?"#639922":i<3?"#86EFAC":"#d1fae5"} h={6}/>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* ── TOP COLORS ────────────────────────────── */}
+                <div style={S.card}>
+                  <div style={S.cHead} className="dtx-chead">
+                    <span style={S.cTitle}>Most ordered colors</span>
+                  </div>
+                  <div style={S.cBody}>
+                    {topColors.length===0&&<div style={S.empty}>No orders yet.</div>}
+                    {topColors.map(([color,cnt],i)=>{
+                      const pc=Math.round(cnt/Math.max(...topColors.map(c=>c[1]))*100)
+                      return (
+                        <div key={color} style={{marginBottom:10}}>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:3}}>
+                            <span dir="auto">{color}</span>
+                            <span style={{color:"#888"}}>{cnt} orders</span>
+                          </div>
+                          <Bar pct={pc} color={`hsl(${i*37},60%,55%)`} h={6}/>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* ── TOP FABRIC TYPES ──────────────────────── */}
+                <div style={S.card}>
+                  <div style={S.cHead} className="dtx-chead">
+                    <span style={S.cTitle}>Most ordered fabric types</span>
+                  </div>
+                  <div style={S.cBody}>
+                    {topFabrics.length===0&&<div style={S.empty}>No orders yet.</div>}
+                    {topFabrics.map(([fab,cnt],i)=>{
+                      const pc=Math.round(cnt/Math.max(...topFabrics.map(f=>f[1]))*100)
+                      return (
+                        <div key={fab} style={{marginBottom:10}}>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:3}}>
+                            <span dir="auto">{fab}</span>
+                            <span style={{color:"#888"}}>{cnt} orders</span>
+                          </div>
+                          <Bar pct={pc} color={`hsl(${200+i*20},60%,50%)`} h={6}/>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* ── MACHINE UTILIZATION ───────────────────── */}
+                <div style={S.card}>
+                  <div style={S.cHead} className="dtx-chead">
+                    <span style={S.cTitle}>Machine utilization</span>
+                    <span style={S.cSub}>current active load</span>
+                  </div>
+                  <div style={S.cBody}>
+                    {machineStats.length===0&&<div style={S.empty}>No machines yet.</div>}
+                    {machineStats.map(m=>{
+                      const pc=Math.round(m.meters/maxMachineM*100)
+                      const machine = machines.find(x=>x.name===m.name)
+                      const st = machine ? machineStatus(m.meters,machine.capacity??DEFAULT_CAP) : "IDLE"
+                      return (
+                        <div key={m.name} style={{marginBottom:14}}>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}>
+                            <span style={{fontWeight:500}}>{m.name}</span>
+                            <span style={{color:statColor(st)}}>{m.meters.toLocaleString()}m · {m.orders} orders</span>
+                          </div>
+                          <Bar pct={pc} color={statColor(st)} h={8}/>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* ── WARP STATUS OVERVIEW ──────────────────── */}
+                <div style={S.card}>
+                  <div style={S.cHead} className="dtx-chead">
+                    <span style={S.cTitle}>Order status overview</span>
+                  </div>
+                  <div style={S.cBody}>
+                    {(["not-started","on-machine","done"] as WarpStatus[]).map(st=>{
+                      const cnt=allOrders.filter(o=>o.warpStatus===st).length
+                      const pc=allOrders.length?Math.round(cnt/allOrders.length*100):0
+                      const label=st==="on-machine"?"On machine":st==="done"?"Done":"Not started"
+                      return (
+                        <div key={st} style={{marginBottom:14}}>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}>
+                            <span>{label}</span><span style={{color:warpColor(st)}}>{cnt} ({pc}%)</span>
+                          </div>
+                          <Bar pct={pc} color={warpColor(st)} h={8}/>
+                        </div>
+                      )
+                    })}
+                    <div style={{marginTop:12,padding:"10px 12px",background:"#fafafa",borderRadius:8}}>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:12}}>
+                        <div><div style={{color:"#aaa",marginBottom:2}}>Active orders</div><div style={{fontWeight:600}}>{activeOrds.length}</div></div>
+                        <div><div style={{color:"#aaa",marginBottom:2}}>Total meters active</div><div style={{fontWeight:600}}>{activeOrds.reduce((s,o)=>s+o.quantity,0).toLocaleString()}m</div></div>
+                        <div><div style={{color:"#aaa",marginBottom:2}}>High priority active</div><div style={{fontWeight:600,color:"#E24B4A"}}>{activeOrds.filter(o=>o.priority==="High").length}</div></div>
+                        <div><div style={{color:"#aaa",marginBottom:2}}>Overdue active</div><div style={{fontWeight:600,color:"#E24B4A"}}>{activeOrds.filter(o=>o.deadline&&new Date(o.deadline)<new Date()).length}</div></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── THREAD VELOCITY ───────────────────────── */}
+                {threadVelocity.length>0&&(
+                  <div style={S.card}>
+                    <div style={S.cHead} className="dtx-chead">
+                      <span style={S.cTitle}>Thread consumption</span>
+                      <span style={S.cSub}>last 30 days</span>
+                    </div>
+                    <div style={S.cBody}>
+                      {threadVelocity.map((t,i)=>{
+                        const pc=Math.round(t.outKg/Math.max(...threadVelocity.map(x=>x.outKg))*100)
+                        return (
+                          <div key={t.label} style={{marginBottom:10}}>
+                            <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}>
+                              <span dir="auto">{t.label}</span><span style={{color:"#888"}}>{t.outKg}kg</span>
+                            </div>
+                            <Bar pct={pc} color={`hsl(${30+i*15},70%,50%)`} h={6}/>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* ── TEXTILE STOCK VELOCITY ────────────────── */}
+                {tsVelocity.length>0&&(
+                  <div style={S.card}>
+                    <div style={S.cHead} className="dtx-chead">
+                      <span style={S.cTitle}>Finished textile outflow</span>
+                      <span style={S.cSub}>delivered last 30 days</span>
+                    </div>
+                    <div style={S.cBody}>
+                      {tsVelocity.map((t,i)=>{
+                        const pc=Math.round(t.outM/Math.max(...tsVelocity.map(x=>x.outM))*100)
+                        return (
+                          <div key={t.label} style={{marginBottom:10}}>
+                            <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}>
+                              <span dir="auto">{t.label}</span><span style={{color:"#888"}}>{t.outM}m</span>
+                            </div>
+                            <Bar pct={pc} color={`hsl(${140+i*15},60%,45%)`} h={6}/>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* ── ORDERS PER MACHINE CATEGORY ───────────── */}
+                <div style={S.card}>
+                  <div style={S.cHead} className="dtx-chead">
+                    <span style={S.cTitle}>Orders per machine type</span>
+                  </div>
+                  <div style={S.cBody}>
+                    {CATS.map(cat=>{
+                      const cnt=allOrders.filter(o=>(o.machineCategories??[]).includes(cat)).length
+                      const pc=allOrders.length?Math.round(cnt/allOrders.length*100):0
+                      return (
+                        <div key={cat} style={{marginBottom:12}}>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}>
+                            <span>{cat}</span><span style={{color:"#888"}}>{cnt}</span>
+                          </div>
+                          <Bar pct={pc} color="#7F77DD" h={6}/>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+
               </div>
             </div>
-          </div>
-        )}
+          )
+        })()}
 
         {/* ── HISTORY VIEW ──────────────────────────────── */}
         {view==="history" && (()=>{
@@ -2737,6 +3078,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                               {warn==="urgent"?"⚠️ Late — ":""}Due {o.deadline}
                             </div>
                           )}
+                          {o.orderDate&&<div style={{fontSize:11,color:"#bbb",marginTop:2}}>📅 Ordered: {o.orderDate}</div>}
                           {o.notes&&<div style={{fontSize:11,color:"#bbb",marginTop:2,fontStyle:"italic"}}>{o.notes}</div>}
                           {o.orderNumber&&<div style={{fontSize:11,color:"#9ca3af",marginTop:2,fontWeight:500}}>#{o.orderNumber}</div>}
                           {o.completedAt&&(
