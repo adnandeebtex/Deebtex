@@ -454,26 +454,32 @@ async function dbLoadTextileStock(): Promise<TextileStock[]> {
 
 // Upsert with retry + visible error + localStorage backup
 async function dbUpsert(table: string, row: Record<string, unknown>) {
+  // strip undefined/null fields — Supabase rejects rows containing
+  // columns it doesn't recognise in its schema cache
+  const cleanRow: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(row)) {
+    if (v !== undefined && v !== null) cleanRow[k] = v
+  }
+
   // always write to localStorage backup first — this never fails
   try {
     const key = `dtx_backup_${table}`
     const existing: Record<string, unknown>[] = JSON.parse(localStorage.getItem(key) || "[]")
-    const idx = existing.findIndex(r => r.id === row.id)
-    if (idx >= 0) existing[idx] = row
-    else existing.push(row)
+    const idx = existing.findIndex(r => r.id === cleanRow.id)
+    if (idx >= 0) existing[idx] = cleanRow
+    else existing.push(cleanRow)
     localStorage.setItem(key, JSON.stringify(existing))
   } catch {}
 
   // try Supabase — retry once if it fails
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const { error } = await db.from(table).upsert(row, { onConflict: "id" })
+    const { error } = await db.from(table).upsert(cleanRow, { onConflict: "id" })
     if (!error) return   // success
-    console.error(`dbUpsert ${table} attempt ${attempt}:`, error.message, error.details, row)
+    console.error(`dbUpsert ${table} attempt ${attempt}:`, error.message, error.details, cleanRow)
     if (attempt === 2) {
-      // second failure — show a visible warning so it's never silent
-      console.warn(`⚠️ SAVE FAILED for ${table} id=${row.id}. Data is in localStorage backup.`)
+      console.warn(`⚠️ SAVE FAILED for ${table} id=${cleanRow.id}. Data is in localStorage backup.`)
     }
-    await new Promise(r => setTimeout(r, 500))   // wait 500ms before retry
+    await new Promise(r => setTimeout(r, 500))
   }
 }
 
