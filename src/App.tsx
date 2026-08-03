@@ -595,11 +595,23 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
     const ld  = q.reduce((s, x) => s + x.quantity, 0)
     const wk  = warpKey(o)
     const slotSealed = sealedSlots.has(`${wk}||${m.id}`)
-    // same-warp bonus: +100000 (high enough to beat ANY load difference)
-    const sameWarp = !slotSealed && q.some(x => warpKey(x) === wk)
+
+    if (!slotSealed) {
+      // count how many meters of THIS warp are already on this machine
+      const warpMeters = q.filter(x => warpKey(x) === wk).reduce((s,x) => s + x.quantity, 0)
+      if (warpMeters > 0) {
+        // same-warp machine: score by how much of this warp is already here
+        // more meters = stronger "primary warp machine" signal
+        // this ensures the machine that got the MOST of this warp wins over
+        // a machine that only got one constrained order incidentally
+        return 1000000 + warpMeters
+      }
+    }
+
+    // no same warp — score by available capacity (prefer less loaded)
     const cap = m.capacity ?? DEFAULT_CAP
     const overload = ld > cap ? (ld - cap) * 2 : 0
-    return (sameWarp ? 100000 : 0) - ld - overload
+    return -ld - overload
   }
 
   for (const o of pending) {
