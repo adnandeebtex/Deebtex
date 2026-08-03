@@ -573,26 +573,33 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
   }
 
   // ── STEP 3: re-optimize all not-started orders
+  // Sort by warpKey FIRST so all orders sharing the same warp are processed
+  // as a consecutive group. Within each warp group, most-constrained order
+  // goes first (fewest compatible machines) so flexible orders follow it
+  // to the same machine, not the other way around.
   const pending = orders
     .filter(o => !locked.has(o.id) && o.warpStatus === "not-started")
     .sort((a, b) => {
+      // primary: group by warp key — keeps same-fabric/color orders together
+      const wkDiff = warpKey(a).localeCompare(warpKey(b))
+      if (wkDiff !== 0) return wkDiff
+      // secondary: within same warp group, most constrained first
       const flexDiff = a.machineCategories.length - b.machineCategories.length
       if (flexDiff !== 0) return flexDiff
-      const priDiff = PRI[b.priority] - PRI[a.priority]
-      if (priDiff !== 0) return priDiff
-      return warpKey(a).localeCompare(warpKey(b))
+      // tertiary: highest priority first
+      return PRI[b.priority] - PRI[a.priority]
     })
 
   function score(m: Machine, o: Order): number {
     const q   = map[m.id]
     const ld  = q.reduce((s, x) => s + x.quantity, 0)
     const wk  = warpKey(o)
-    // Only give same-warp bonus if the slot is NOT sealed
     const slotSealed = sealedSlots.has(`${wk}||${m.id}`)
+    // same-warp bonus: +100000 (high enough to beat ANY load difference)
     const sameWarp = !slotSealed && q.some(x => warpKey(x) === wk)
     const cap = m.capacity ?? DEFAULT_CAP
     const overload = ld > cap ? (ld - cap) * 2 : 0
-    return (sameWarp ? 10000 : 0) - ld - overload
+    return (sameWarp ? 100000 : 0) - ld - overload
   }
 
   for (const o of pending) {
