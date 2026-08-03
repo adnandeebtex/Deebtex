@@ -1940,6 +1940,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <td dir="auto">${o.color}</td>
         <td dir="auto">${o.fabricType}</td>
         <td>${o.quantity}m</td>
+        <td>${o.orderDate || "—"}</td>
         <td>${o.deadline || "—"}</td>
         <td>${o.orderNumber ? "#" + o.orderNumber : "—"}</td>
         <td>${o.priority}</td>
@@ -2011,7 +2012,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <th>Color</th>
         <th>Fabric type</th>
         <th>Quantity</th>
-        <th>Deadline</th>
+        <th>Order date</th>
+        <th>Due date</th>
         <th>Order no.</th>
         <th>Priority</th>
       </tr>
