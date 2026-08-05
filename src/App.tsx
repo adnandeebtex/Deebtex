@@ -289,6 +289,11 @@ type Machine = {
   id: number; name: string; category: MachineCategory; capacity: number
   outOfOrder?: boolean   // true = machine is down, orders reassigned automatically
 }
+const STORES = [
+  "دمياط","دمياط ٢","عباس العقاد","الدقي",
+  "سموحة","العطارين","لوران","العبور",
+] as const
+
 type Order   = {
   id: number
   textileCode: string
@@ -298,19 +303,22 @@ type Order   = {
   machineCategories: MachineCategory[]
   warpStatus: WarpStatus; notes: string
   orderNumber?: string
-  orderDate?: string     // ISO date — when the order was placed
+  orderDate?: string
+  store?: string
   forcedMachineId?: number
   warpClosed?: boolean
   warpGroupId?: string
-  completedAt?: string   // ISO timestamp — set when order is marked done
+  completedAt?: string
 }
 // A saved textile definition
 type Textile = {
   id: number
-  code: string           // e.g. "1138/01/01" — the unique identifier
-  name: string           // e.g. "Montana" — human-readable name
+  code: string
+  name: string
   color: string
   fabricType: string
+  pattern: string     // e.g. "زهور", "هندسي"
+  weave: string       // e.g. "ساتان", "تويل"
   machineCategories: MachineCategory[]
   notes: string
 }
@@ -361,6 +369,7 @@ function sanitizeOrder(row: Record<string, unknown>): Order {
     notes:             String(row.notes ?? ""),
     orderNumber:       row.orderNumber ? String(row.orderNumber) : undefined,
     orderDate:         row.orderDate   ? String(row.orderDate)   : undefined,
+    store:             row.store       ? String(row.store)       : undefined,
     forcedMachineId:   row.forcedMachineId != null ? Number(row.forcedMachineId) : undefined,
     warpClosed:        row.warpClosed === true,
     completedAt:       row.completedAt ? String(row.completedAt) : undefined,
@@ -417,11 +426,12 @@ function sanitizeTextileStock(row: Record<string, unknown>): TextileStock {
 function sanitizeTextile(row: Record<string, unknown>): Textile {
   return {
     id:                Number(row.id),
-    // support old rows that only have "name" — treat it as code
     code:              String(row.code ?? row.name ?? ""),
     name:              String(row.name ?? ""),
     color:             String(row.color ?? ""),
     fabricType:        String(row.fabricType ?? ""),
+    pattern:           String(row.pattern ?? ""),
+    weave:             String(row.weave ?? ""),
     machineCategories: (row.machineCategories as MachineCategory[]) ?? [],
     notes:             String(row.notes ?? ""),
   }
@@ -590,6 +600,16 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
       return PRI[b.priority] - PRI[a.priority]
     })
 
+  // Machine category priority — when no same-warp exists, prefer higher-capability machines
+  // Electronic > Mechanical for the same fabric (electronic machines handle more order types)
+  const MACHINE_PRIORITY: Record<MachineCategory, number> = {
+    "Electronic Double":     4,
+    "Electronic 4":          3,
+    "Mechanical Double 280": 2,
+    "Mechanical Double 140": 2,
+    "Mechanical 4":          1,
+  }
+
   function score(m: Machine, o: Order): number {
     const q   = map[m.id]
     const ld  = q.reduce((s, x) => s + x.quantity, 0)
@@ -602,16 +622,17 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
       if (warpMeters > 0) {
         // same-warp machine: score by how much of this warp is already here
         // more meters = stronger "primary warp machine" signal
-        // this ensures the machine that got the MOST of this warp wins over
-        // a machine that only got one constrained order incidentally
         return 1000000 + warpMeters
       }
     }
 
-    // no same warp — score by available capacity (prefer less loaded)
+    // no same warp — score by machine priority first, then available capacity
+    // this ensures جانيت goes to Electronic 4 (علم) before Mechanical 4
+    // when both are equally empty
     const cap = m.capacity ?? DEFAULT_CAP
     const overload = ld > cap ? (ld - cap) * 2 : 0
-    return -ld - overload
+    const priority = MACHINE_PRIORITY[m.category] ?? 0
+    return (priority * 10000) - ld - overload
   }
 
   for (const o of pending) {
@@ -893,7 +914,7 @@ type OFProps = {
   selectedTextileId: number|null
   textileCode:string; textileName:string; color:string; fabricType:string; quantity:string
   deadline:string; priority:Priority; categories:MachineCategory[]; notes:string
-  orderNumber:string; orderDate:string
+  orderNumber:string; orderDate:string; store:string
   isEdit:boolean
   set: {
     selectedTextileId:(v:number|null)=>void
@@ -901,12 +922,12 @@ type OFProps = {
     color:(v:string)=>void; fabricType:(v:string)=>void
     quantity:(v:string)=>void; deadline:(v:string)=>void; priority:(v:Priority)=>void
     categories:(v:MachineCategory[])=>void; notes:(v:string)=>void
-    orderNumber:(v:string)=>void; orderDate:(v:string)=>void
+    orderNumber:(v:string)=>void; orderDate:(v:string)=>void; store:(v:string)=>void
   }
   onSave:()=>void
 }
 
-function OrderFormUI({ textiles,selectedTextileId,textileCode,textileName,color,fabricType,quantity,deadline,priority,categories,notes,orderNumber,orderDate,isEdit,set,onSave }: OFProps) {
+function OrderFormUI({ textiles,selectedTextileId,textileCode,textileName,color,fabricType,quantity,deadline,priority,categories,notes,orderNumber,orderDate,store,isEdit,set,onSave }: OFProps) {
   const fromDB = selectedTextileId !== null
   const [txSearch, setTxSearch] = useState("")
   const [txOpen,   setTxOpen]   = useState(false)
@@ -1070,6 +1091,12 @@ function OrderFormUI({ textiles,selectedTextileId,textileCode,textileName,color,
         <Field label="Order number (optional)">
           <input style={S.input} value={orderNumber} onChange={e=>set.orderNumber(e.target.value)} placeholder="e.g. ORD-2024-001" dir="auto"/>
         </Field>
+        <Field label="Store">
+          <select style={S.input} value={store} onChange={e=>set.store(e.target.value)} dir="auto">
+            <option value="">— select store —</option>
+            {STORES.map(s=><option key={s} value={s}>{s}</option>)}
+          </select>
+        </Field>
         <Field label="Notes (optional)">
           <input style={S.input} value={notes} onChange={e=>set.notes(e.target.value)} placeholder="Special instructions…" />
         </Field>
@@ -1111,18 +1138,20 @@ function MachineFormUI({ name,category,capacity,isEdit,set,onSave }: MFProps) {
 // ─── TEXTILE FORM (top-level component) ──────────────────────
 type TFProps = {
   code:string; name:string; color:string; fabricType:string
+  pattern:string; weave:string
   categories:MachineCategory[]; notes:string; isEdit:boolean
   knownColors: string[]
   knownFabrics: string[]
   set: {
     code:(v:string)=>void; name:(v:string)=>void
     color:(v:string)=>void; fabricType:(v:string)=>void
+    pattern:(v:string)=>void; weave:(v:string)=>void
     categories:(v:MachineCategory[])=>void; notes:(v:string)=>void
   }
   onSave:()=>void
 }
 
-function TextileFormUI({ code,name,color,fabricType,categories,notes,isEdit,knownColors,knownFabrics,set,onSave }: TFProps) {
+function TextileFormUI({ code,name,color,fabricType,pattern,weave,categories,notes,isEdit,knownColors,knownFabrics,set,onSave }: TFProps) {
   function toggleCat(cat: MachineCategory) {
     set.categories(categories.includes(cat) ? categories.filter(c=>c!==cat) : [...categories,cat])
   }
@@ -1142,6 +1171,14 @@ function TextileFormUI({ code,name,color,fabricType,categories,notes,isEdit,know
         </Field>
         <Field label="Fabric type">
           <AutocompleteInput value={fabricType} onChange={set.fabricType} suggestions={knownFabrics} placeholder="e.g. جاكار"/>
+        </Field>
+        <Field label="Pattern (optional)">
+          <input style={S.input} value={pattern} onChange={e=>set.pattern(e.target.value)}
+            placeholder="e.g. زهور، هندسي" dir="auto"/>
+        </Field>
+        <Field label="Weave (optional)">
+          <input style={S.input} value={weave} onChange={e=>set.weave(e.target.value)}
+            placeholder="e.g. ساتان، تويل" dir="auto"/>
         </Field>
       </div>
       <Field label="Compatible machine types">
@@ -1213,6 +1250,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [tFab,   setTFab]   = useState("")
   const [tCats,  setTCats]  = useState<MachineCategory[]>([])
   const [tNotes, setTNotes] = useState("")
+  const [tPattern,setTPattern]= useState("")
+  const [tWeave,  setTWeave]  = useState("")
 
   // thread form state
   const [thCode,  setThCode]  = useState("")
@@ -1250,6 +1289,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [oNotes,   setONotes]   = useState("")
   const [oOrderNum,setOOrderNum]= useState("")
   const [oOrderDate,setOOrderDate]= useState("")
+  const [oStore,setOStore]= useState("")
 
   const [forceSwitchOrder, setForceSwitchOrder] = useState<Order|null>(null)
   const [historySearch, setHistorySearch] = useState("")
@@ -1510,13 +1550,13 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   }
 
   // textile actions
-  function resetTF() { setTCode(""); setTName(""); setTColor(""); setTFab(""); setTCats([]); setTNotes("") }
+  function resetTF() { setTCode(""); setTName(""); setTColor(""); setTFab(""); setTCats([]); setTNotes(""); setTPattern(""); setTWeave("") }
 
   async function saveTextile() {
     if (!tCode.trim() || !tFab.trim() || tCats.length === 0) return
     if (editT) {
       const updated: Textile = { ...editT, code:tCode, name:tName, color:tColor,
-        fabricType:tFab, machineCategories:tCats, notes:tNotes }
+        fabricType:tFab, pattern:tPattern, weave:tWeave, machineCategories:tCats, notes:tNotes }
       setTextiles(p => p.map(t => t.id===editT.id ? updated : t))
       await dbUpsert("textiles", updated as unknown as Record<string, unknown>)
       // ── AUTO-LINK: update all orders that match this textile code
@@ -1533,7 +1573,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       setEditT(null)
     } else {
       const created: Textile = { id:Date.now(), code:tCode, name:tName, color:tColor,
-        fabricType:tFab, machineCategories:tCats, notes:tNotes }
+        fabricType:tFab, pattern:tPattern, weave:tWeave, machineCategories:tCats, notes:tNotes }
       setTextiles(p => [...p, created])
       await dbUpsert("textiles", created as unknown as Record<string, unknown>)
       // ── AUTO-LINK new textile: update matching existing orders
@@ -1553,6 +1593,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
   function openEditTextile(t: Textile) {
     setTCode(t.code); setTName(t.name); setTColor(t.color); setTFab(t.fabricType)
+    setTPattern(t.pattern); setTWeave(t.weave)
     setTCats(t.machineCategories); setTNotes(t.notes); setEditT(t)
   }
 
@@ -1565,7 +1606,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   function resetOF() {
     setOSelId(null)
     setOTextileCode(""); setOTextileName(""); setOColor(""); setOFabric(""); setOQty("")
-    setODl(""); setOPri("Normal"); setOCats([]); setONotes(""); setOOrderNum(""); setOOrderDate("")
+    setODl(""); setOPri("Normal"); setOCats([]); setONotes(""); setOOrderNum(""); setOOrderDate(""); setOStore("")
   }
 
   async function saveOrder() {
@@ -1579,6 +1620,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       machineCategories:oCats, warpStatus:editO?.warpStatus??"not-started", notes:oNotes,
       orderNumber: oOrderNum.trim() || undefined,
       orderDate:   oOrderDate || undefined,
+      store:       oStore || undefined,
     }
     if (editO) {
       setOrders(p => p.map(o => o.id===editO.id ? data : o))
@@ -1596,6 +1638,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         const newT: Textile = {
           id: Date.now() + 1,
           code:oTextileCode, name:oTextileName, color:oColor, fabricType:oFabric,
+          pattern:"", weave:"",
           machineCategories:oCats, notes:oNotes,
         }
         setTextiles(p => [...p, newT])
@@ -1611,7 +1654,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     setOColor(o.color); setOFabric(o.fabricType)
     setOQty(String(o.quantity)); setODl(o.deadline); setOPri(o.priority)
     setOCats(o.machineCategories ?? []); setONotes(o.notes)
-    setOOrderNum(o.orderNumber ?? ""); setOOrderDate(o.orderDate ?? ""); setEditO(o)
+    setOOrderNum(o.orderNumber ?? ""); setOOrderDate(o.orderDate ?? ""); setOStore(o.store ?? ""); setEditO(o)
   }
 
   async function delOrder(id: number) {
@@ -2092,14 +2135,15 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     textileCode:oTextileCode, textileName:oTextileName,
     color:oColor, fabricType:oFabric, quantity:oQty,
     deadline:oDl, priority:oPri, categories:oCats, notes:oNotes,
-    orderNumber:oOrderNum, orderDate:oOrderDate,
+    orderNumber:oOrderNum, orderDate:oOrderDate, store:oStore,
     isEdit:!!editO,
     set:{
       selectedTextileId:setOSelId,
       textileCode:setOTextileCode, textileName:setOTextileName,
       color:setOColor, fabricType:setOFabric,
       quantity:setOQty, deadline:setODl, priority:setOPri,
-      categories:setOCats, notes:setONotes, orderNumber:setOOrderNum, orderDate:setOOrderDate,
+      categories:setOCats, notes:setONotes, orderNumber:setOOrderNum,
+      orderDate:setOOrderDate, store:setOStore,
     },
     onSave:saveOrder,
   }
@@ -2109,9 +2153,13 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     onSave:saveMachine,
   }
   const textileFormProps: TFProps = {
-    code:tCode, name:tName, color:tColor, fabricType:tFab, categories:tCats, notes:tNotes,
+    code:tCode, name:tName, color:tColor, fabricType:tFab,
+    pattern:tPattern, weave:tWeave,
+    categories:tCats, notes:tNotes,
     isEdit:!!editT, knownColors, knownFabrics,
-    set:{ code:setTCode, name:setTName, color:setTColor, fabricType:setTFab, categories:setTCats, notes:setTNotes },
+    set:{ code:setTCode, name:setTName, color:setTColor, fabricType:setTFab,
+      pattern:setTPattern, weave:setTWeave,
+      categories:setTCats, notes:setTNotes },
     onSave:saveTextile,
   }
 
@@ -2531,6 +2579,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                           </div>
                         )}
                         {o.orderDate&&<div style={{fontSize:11,color:"#aaa",marginTop:2}}>📅 Ordered: {o.orderDate}</div>}
+                        {o.store&&<div style={{fontSize:11,color:"#534AB7",marginTop:2,fontWeight:500}}>🏪 {o.store}</div>}
                         {o.notes&&<div style={{fontSize:11,color:"#aaa",marginTop:2,fontStyle:"italic"}}>{o.notes}</div>}
                         {o.orderNumber&&<div style={{fontSize:11,color:"#7F77DD",marginTop:2,fontWeight:500}}>#{o.orderNumber}</div>}
                         {assignedMachine&&<div style={{fontSize:11,color:"#7F77DD",marginTop:2}}>→ {assignedMachine.name}</div>}
@@ -3032,6 +3081,55 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                   </div>
                 </div>
 
+                {/* ── SALES BY STORE ────────────────────────── */}
+                <div style={S.card}>
+                  <div style={S.cHead} className="dtx-chead">
+                    <span style={S.cTitle}>Sales by store</span>
+                    <span style={S.cSub}>orders & meters per branch</span>
+                  </div>
+                  <div style={S.cBody}>
+                    {(()=>{
+                      const storeData = STORES.map(s=>{
+                        const storeOrders = allOrders.filter(o=>o.store===s)
+                        const meters = storeOrders.reduce((sum,o)=>sum+o.quantity,0)
+                        const done   = storeOrders.filter(o=>o.warpStatus==="done").reduce((sum,o)=>sum+o.quantity,0)
+                        return {store:s, count:storeOrders.length, meters, done}
+                      }).filter(s=>s.count>0).sort((a,b)=>b.meters-a.meters)
+                      const noStore = allOrders.filter(o=>!o.store).length
+                      const maxM = Math.max(...storeData.map(s=>s.meters),1)
+                      if (storeData.length===0) return (
+                        <div style={S.empty}>No store data yet. Select a store when adding orders.</div>
+                      )
+                      return (
+                        <>
+                          {storeData.map((s,i)=>(
+                            <div key={s.store} style={{marginBottom:14}}>
+                              <div style={{display:"flex",justifyContent:"space-between",
+                                fontSize:13,marginBottom:4,alignItems:"center"}}>
+                                <span style={{fontWeight:i===0?600:400}} dir="auto">
+                                  {i===0?"🏆 ":""}{s.store}
+                                </span>
+                                <div style={{display:"flex",gap:10,fontSize:12,color:"#888"}}>
+                                  <span>{s.count} orders</span>
+                                  <span style={{color:"#534AB7",fontWeight:500}}>{s.meters.toLocaleString()}m</span>
+                                  {s.done>0&&<span style={{color:"#639922"}}>{s.done}m done</span>}
+                                </div>
+                              </div>
+                              <Bar pct={Math.round(s.meters/maxM*100)}
+                                color={i===0?"#534AB7":i===1?"#7F77DD":"#c4c0f0"} h={8}/>
+                            </div>
+                          ))}
+                          {noStore>0&&(
+                            <div style={{marginTop:8,fontSize:11,color:"#bbb"}}>
+                              {noStore} order{noStore>1?"s":""} with no store assigned
+                            </div>
+                          )}
+                        </>
+                      )
+                    })()}
+                  </div>
+                </div>
+
               </div>
             </div>
           )
@@ -3106,6 +3204,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                             </div>
                           )}
                           {o.orderDate&&<div style={{fontSize:11,color:"#bbb",marginTop:2}}>📅 Ordered: {o.orderDate}</div>}
+                          {o.store&&<div style={{fontSize:11,color:"#9ca3af",marginTop:2}}>🏪 {o.store}</div>}
                           {o.notes&&<div style={{fontSize:11,color:"#bbb",marginTop:2,fontStyle:"italic"}}>{o.notes}</div>}
                           {o.orderNumber&&<div style={{fontSize:11,color:"#9ca3af",marginTop:2,fontWeight:500}}>#{o.orderNumber}</div>}
                           {o.completedAt&&(
@@ -3559,6 +3658,11 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                     <div style={{flex:1}}>
                       <div style={{fontSize:14,fontWeight:500,direction:"auto" as CSSProperties["direction"]}}>{t.code}{t.name ? ` — ${t.name}` : ""}</div>
                       <div style={{fontSize:12,color:"#888",marginTop:2,direction:"auto" as CSSProperties["direction"]}}>{t.fabricType} · {t.color}</div>
+                      {(t.pattern||t.weave)&&(
+                        <div style={{fontSize:11,color:"#aaa",marginTop:2}} dir="auto">
+                          {[t.pattern,t.weave].filter(Boolean).join(" · ")}
+                        </div>
+                      )}
                       <div style={{fontSize:11,color:"#aaa",marginTop:4,display:"flex",flexWrap:"wrap",gap:4}}>
                         {t.machineCategories.map(c=>(
                           <span key={c} style={{background:"#f0f0f0",borderRadius:4,padding:"1px 7px"}}>{c}</span>
