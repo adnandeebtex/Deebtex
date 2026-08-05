@@ -1984,7 +1984,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     groupOrderIds: number[],
     meters: number
   ) {
-    // get the orders, sorted alphabetically by textile code then name
     const groupOrders = orders
       .filter(o => groupOrderIds.includes(o.id))
       .sort((a, b) => {
@@ -1994,20 +1993,27 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       })
 
     const date = new Date().toLocaleDateString("en-GB")
-    const rows = groupOrders.map((o, i) => `
+    const rows = groupOrders.map((o, i) => {
+      // look up pattern and weave from the textile database
+      const textile = textiles.find(t => t.code === o.textileCode)
+      const pattern = textile?.pattern || "—"
+      const weave   = textile?.weave   || "—"
+      return `
       <tr>
         <td>${i + 1}</td>
         <td dir="auto">${o.textileCode}</td>
         <td dir="auto">${o.textileName || "—"}</td>
         <td dir="auto">${o.color}</td>
         <td dir="auto">${o.fabricType}</td>
+        <td dir="auto">${pattern}</td>
+        <td dir="auto">${weave}</td>
         <td>${o.quantity}m</td>
         <td>${o.orderDate || "—"}</td>
         <td>${o.deadline || "—"}</td>
         <td>${o.orderNumber ? "#" + o.orderNumber : "—"}</td>
         <td>${o.priority}</td>
       </tr>
-    `).join("")
+    `}).join("")
 
     const html = `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -2073,6 +2079,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <th>Name</th>
         <th>Color</th>
         <th>Fabric type</th>
+        <th>Pattern</th>
+        <th>Weave</th>
         <th>Quantity</th>
         <th>Order date</th>
         <th>Due date</th>
