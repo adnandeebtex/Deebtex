@@ -1297,6 +1297,17 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(new Set())
   const [warpGroupSearch, setWarpGroupSearch] = useState("")
   const [confirmDeleteOrder, setConfirmDeleteOrder] = useState<Order|null>(null)
+  // tracks which warp blocks are expanded in the schedule — key = machineId+warpKey+blockIndex
+  const [expandedBlocks, setExpandedBlocks] = useState<Set<string>>(new Set())
+
+  function toggleBlock(key: string) {
+    setExpandedBlocks(p => {
+      const next = new Set(p)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
   const [orderSort,   setOrderSort]   = useState<"name" | "deadline">("name")
   const [textileSearch, setTextileSearch] = useState("")
   const [textileSort,   setTextileSort]   = useState<"name" | "fabricType">("name")
@@ -2389,45 +2400,56 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                               const wk = warpKey(block[0])
                               const totalM = block.reduce((s,o)=>s+o.quantity,0)
                               const topPri = block.reduce((best,o) => PRI[o.priority]>PRI[best.priority]?o:best, block[0]).priority
+                              const blockKey = `${m.id}||${wk}||${bi}`
+                              const isExpanded = expandedBlocks.has(blockKey)
                               return (
                                 <div key={wk+bi} style={{
                                   border:"0.5px solid #e5e5e5",borderRadius:8,
                                   marginBottom:6,overflow:"hidden",
                                   borderLeft: bi===0 ? "3px solid #7F77DD" : "3px solid #e0e0e0",
                                 }}>
-                                  {/* warp group header */}
-                                  <div style={{display:"flex",alignItems:"center",gap:8,
-                                    padding:"6px 10px",background:bi===0?"#F8F7FF":"#fafafa"}}>
+                                  {/* warp group header — click to expand/collapse */}
+                                  <div
+                                    onClick={()=>toggleBlock(blockKey)}
+                                    style={{display:"flex",alignItems:"center",gap:8,
+                                      padding:"8px 10px",background:bi===0?"#F8F7FF":"#fafafa",
+                                      cursor:"pointer",userSelect:"none"}}
+                                    onMouseEnter={e=>(e.currentTarget.style.background=bi===0?"#EEEDFE":"#f0f0f0")}
+                                    onMouseLeave={e=>(e.currentTarget.style.background=bi===0?"#F8F7FF":"#fafafa")}
+                                  >
+                                    {/* expand chevron */}
+                                    <span style={{fontSize:10,color:"#aaa",width:12,flexShrink:0,transition:"transform 0.15s",
+                                      display:"inline-block",transform:isExpanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
                                     <div style={{flex:1}}>
                                       <span style={{fontSize:12,fontWeight:600,color:bi===0?"#534AB7":"#555"}}>
-                                        {bi===0?"▶ ":""}{block[0].fabricType} · {block[0].color}
+                                        {block[0].fabricType} · {block[0].color}
                                       </span>
                                       <span style={{fontSize:11,color:"#aaa",marginLeft:8}}>
                                         {block.length} order{block.length>1?"s":""} · {totalM}m
                                       </span>
                                       <Badge text={topPri} color={priColor(topPri)}/>
                                     </div>
-                                    {/* reorder arrows */}
-                                    <div style={{display:"flex",gap:2}}>
+                                    {/* reorder arrows — stop propagation so they don't toggle expand */}
+                                    <div style={{display:"flex",gap:2}} onClick={e=>e.stopPropagation()}>
                                       <button
-                                        onClick={()=>moveWarpGroup(m.id, wk, "up")}
+                                        onClick={e=>{e.stopPropagation();moveWarpGroup(m.id, wk, "up")}}
                                         disabled={bi===0}
                                         style={{...S.btnIcon,fontSize:12,opacity:bi===0?0.3:1,padding:"2px 5px",
                                           border:"0.5px solid #e0e0e0",borderRadius:4}}
                                         title="Move warp group earlier">▲</button>
                                       <button
-                                        onClick={()=>moveWarpGroup(m.id, wk, "down")}
+                                        onClick={e=>{e.stopPropagation();moveWarpGroup(m.id, wk, "down")}}
                                         disabled={bi===warpBlocks.length-1}
                                         style={{...S.btnIcon,fontSize:12,opacity:bi===warpBlocks.length-1?0.3:1,padding:"2px 5px",
                                           border:"0.5px solid #e0e0e0",borderRadius:4}}
                                         title="Move warp group later">▼</button>
                                     </div>
                                   </div>
-                                  {/* orders in this warp block */}
-                                  {block.map((o,oi)=>(
+                                  {/* orders — only shown when expanded */}
+                                  {isExpanded && block.map((o,oi)=>(
                                     <div key={o.id} style={{...S.qItem,
                                       margin:0,borderRadius:0,borderBottom:"0.5px solid #f0f0f0",
-                                      background:bi===0&&oi===0?"#F8F7FF":"transparent"}}>
+                                      background:"transparent"}}>
                                       <span style={S.qNum}>{running.length + warpBlocks.slice(0,bi).reduce((s,b)=>s+b.length,0) + oi + 1}</span>
                                       <span style={{flex:1,fontSize:12}}>
                                         {orderLabel(o)} · {o.quantity}m
