@@ -1993,9 +1993,11 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         return (a.textileName ?? "").localeCompare(b.textileName ?? "", "ar")
       })
 
+    const totalOrderMeters = groupOrders.reduce((s, o) => s + o.quantity, 0)
+    const totalWarpMeters  = meters   // already calculated as calcWarp sum
+
     const date = new Date().toLocaleDateString("en-GB")
     const rows = groupOrders.map((o, i) => {
-      // look up pattern and weave from the textile database
       const textile = textiles.find(t => t.code === o.textileCode)
       const pattern = textile?.pattern || "—"
       const weave   = textile?.weave   || "—"
@@ -2004,14 +2006,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <td>${i + 1}</td>
         <td dir="auto">${o.textileCode}</td>
         <td dir="auto">${o.textileName || "—"}</td>
-        <td dir="auto">${o.color}</td>
-        <td dir="auto">${o.fabricType}</td>
         <td dir="auto">${pattern}</td>
         <td dir="auto">${weave}</td>
         <td>${o.quantity}m</td>
         <td>${o.orderDate || "—"}</td>
-        <td>${o.deadline || "—"}</td>
-        <td>${o.orderNumber ? "#" + o.orderNumber : "—"}</td>
         <td>${o.priority}</td>
       </tr>
     `}).join("")
@@ -2063,12 +2061,20 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       <div class="info-val" dir="auto">${label}</div>
     </div>
     <div class="info-item">
-      <div class="info-label">Total meters</div>
-      <div class="info-val">${meters}m</div>
+      <div class="info-label">Total order meters</div>
+      <div class="info-val">${totalOrderMeters}m</div>
+    </div>
+    <div class="info-item">
+      <div class="info-label">Total warp meters</div>
+      <div class="info-val" style="color:#534AB7">${totalWarpMeters}m</div>
     </div>
     <div class="info-item">
       <div class="info-label">Orders</div>
       <div class="info-val">${groupOrders.length}</div>
+    </div>
+    <div class="info-item">
+      <div class="info-label">Machine</div>
+      <div class="info-val">${machine}</div>
     </div>
   </div>
 
@@ -2078,21 +2084,20 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <th>#</th>
         <th>Code</th>
         <th>Name</th>
-        <th>Color</th>
-        <th>Fabric type</th>
         <th>Pattern</th>
         <th>Weave</th>
         <th>Quantity</th>
         <th>Order date</th>
-        <th>Due date</th>
-        <th>Order no.</th>
         <th>Priority</th>
       </tr>
     </thead>
     <tbody>${rows}</tbody>
   </table>
 
-  <div class="total">Total: ${meters}m across ${groupOrders.length} orders</div>
+  <div class="total">
+    Order total: ${totalOrderMeters}m &nbsp;·&nbsp; Warp total: <span style="color:#534AB7">${totalWarpMeters}m</span>
+    &nbsp;·&nbsp; ${groupOrders.length} orders
+  </div>
 
   <div class="sig">
     <div class="sig-box">
