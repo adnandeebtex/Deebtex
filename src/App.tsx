@@ -1296,6 +1296,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [warpOrder, setWarpOrder] = useState<WarpOrder>({})
   const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(new Set())
   const [warpGroupSearch, setWarpGroupSearch] = useState("")
+  const [confirmDeleteOrder, setConfirmDeleteOrder] = useState<Order|null>(null)
   const [orderSort,   setOrderSort]   = useState<"name" | "deadline">("name")
   const [textileSearch, setTextileSearch] = useState("")
   const [textileSort,   setTextileSort]   = useState<"name" | "fabricType">("name")
@@ -2604,7 +2605,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                             <option value="done">Done</option>
                           </select>
                           <button style={S.btnIcon} onClick={()=>openEditOrder(o)} title="Edit">✏️</button>
-                          <button style={{...S.btnIcon,color:"#E24B4A"}} onClick={()=>delOrder(o.id)} title="Delete">🗑</button>
+                          <button style={{...S.btnIcon,color:"#E24B4A"}} onClick={()=>setConfirmDeleteOrder(o)} title="Delete">🗑</button>
                         </div>
                       </div>
                     </div>
@@ -3896,6 +3897,58 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             <input style={S.input} value={logNote} onChange={e=>setLogNote(e.target.value)} placeholder="e.g. Received from supplier / Delivered to client"/>
           </Field>
           <button style={S.btnPrimary} onClick={submitManualLog}>Log movement</button>
+        </Modal>
+      )}
+
+      {/* ── DELETE ORDER CONFIRMATION ─────────────────── */}
+      {confirmDeleteOrder&&(
+        <Modal title="Delete order?" onClose={()=>setConfirmDeleteOrder(null)}>
+          <div style={{marginBottom:16}}>
+            <div style={{fontSize:13,color:"#555",marginBottom:12,lineHeight:1.6}}>
+              Are you sure you want to permanently delete this order?
+            </div>
+            <div style={{background:"#fafafa",border:"0.5px solid #e5e5e5",borderRadius:8,padding:"12px 14px"}}>
+              <div style={{fontSize:14,fontWeight:600,marginBottom:4}} dir="auto">
+                {confirmDeleteOrder.textileCode}
+                {confirmDeleteOrder.textileName ? ` — ${confirmDeleteOrder.textileName}` : ""}
+              </div>
+              <div style={{fontSize:12,color:"#888",marginBottom:2}} dir="auto">
+                {confirmDeleteOrder.fabricType} · {confirmDeleteOrder.color}
+              </div>
+              <div style={{fontSize:12,color:"#888",marginBottom:2}}>
+                {confirmDeleteOrder.quantity}m · {confirmDeleteOrder.priority} priority
+              </div>
+              {confirmDeleteOrder.deadline&&(
+                <div style={{fontSize:12,color:"#888",marginBottom:2}}>
+                  Due: {confirmDeleteOrder.deadline}
+                </div>
+              )}
+              {confirmDeleteOrder.orderNumber&&(
+                <div style={{fontSize:12,color:"#7F77DD"}}>#{confirmDeleteOrder.orderNumber}</div>
+              )}
+              {confirmDeleteOrder.store&&(
+                <div style={{fontSize:12,color:"#888"}} dir="auto">🏪 {confirmDeleteOrder.store}</div>
+              )}
+            </div>
+            <div style={{marginTop:10,fontSize:12,color:"#E24B4A",fontWeight:500}}>
+              ⚠️ This action cannot be undone.
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button
+              style={{...S.btnPrimary,background:"#E24B4A",flex:1}}
+              onClick={async ()=>{
+                await delOrder(confirmDeleteOrder.id)
+                setConfirmDeleteOrder(null)
+              }}>
+              Yes, delete
+            </button>
+            <button
+              style={{...S.btnSm,flex:1,padding:"10px",fontSize:13}}
+              onClick={()=>setConfirmDeleteOrder(null)}>
+              Cancel
+            </button>
+          </div>
         </Modal>
       )}
 
