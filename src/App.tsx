@@ -245,7 +245,7 @@ type MachineCategory =
   | "Mechanical Double 280" | "Mechanical Double 140"
 type Priority   = "High" | "Normal" | "Low"
 type WarpStatus = "not-started" | "on-machine" | "done"
-type View = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history" | "suggestions" | "threads" | "textile-stock"
+type View = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history" | "suggestions" | "threads" | "textile-stock" | "import"
 
 // warpOrder: per-machine ordered list of warpKeys — controls which warp group runs first
 // key = machineId, value = array of warpKeys in display order
@@ -1297,6 +1297,19 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(new Set())
   const [warpGroupSearch, setWarpGroupSearch] = useState("")
   const [confirmDeleteOrder, setConfirmDeleteOrder] = useState<Order|null>(null)
+
+  // ── IMPORT STATE ──────────────────────────────────────────
+  type ImportRow = {
+    appCode: string; textileName: string; color: string
+    qty: number; store: string; ordered: string; due: string
+    orderNum: string; status: "new"|"duplicate"|"no-textile"
+    tex: Textile|null
+  }
+  const [importRows,     setImportRows]     = useState<ImportRow[]>([])
+  const [importSelected, setImportSelected] = useState<Set<number>>(new Set())
+  const [importStatus,   setImportStatus]   = useState<"idle"|"parsing"|"preview"|"importing"|"done">("idle")
+  const [importLog,      setImportLog]      = useState<string[]>([])
+  const [importProgress, setImportProgress] = useState(0)
   // tracks which warp blocks are expanded in the schedule — key = machineId+warpKey+blockIndex
   const [expandedBlocks, setExpandedBlocks] = useState<Set<string>>(new Set())
 
@@ -2199,6 +2212,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     {id:"analytics",     icon:"↗", label:"Analytics"},
     {id:"history",       icon:"🕓", label:"History"},
     {id:"suggestions",   icon:"💡", label:"Suggestions"},
+    {id:"import",        icon:"📥", label:"Import"},
   ]
 
   // ── LOADING GATE ──────────────────────────────────────────
@@ -3485,6 +3499,325 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                   </div>
                 </div>
               ))}
+            </div>
+          )
+        })()}
+
+        {/* ── IMPORT VIEW ───────────────────────────────── */}
+        {view==="import" && (()=>{
+          const STORE_PAIRS: [string,string][] = [
+            ["دمياط 2","دمياط ٢"],["دمياط","دمياط"],["سموحة","سموحة"],
+            ["العطارين","العطارين"],["الدقى","الدقي"],["الدقي","الدقي"],
+            ["لوران","لوران"],["العبور","العبور"],["عباس العقاد","عباس العقاد"],
+          ]
+          function normAr(s:string):string {
+            return (s||"")
+              .replace(/[\u064A\u06CC\u0649\u06D2]/g,"\u064A")
+              .replace(/[\u0622\u0623\u0625\u0671]/g,"\u0627")
+              .replace(/\u0640/g,"").trim()
+          }
+          function normStore(s:string):string {
+            const n=normAr(s)
+            for(const[k,v]of STORE_PAIRS){if(n.includes(normAr(k)))return v}
+            return s.trim()
+          }
+          function dupKey(code:string,ordered:string,orderNum:string):string {
+            return `${code}||${ordered}||${orderNum.trim()}`
+          }
+
+          async function parsePDF(file:File) {
+            // Load PDF.js dynamically if not already loaded
+            if(!(window as unknown as Record<string,unknown>).pdfjsLib) {
+              await new Promise<void>((res,rej)=>{
+                const s=document.createElement("script")
+                s.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
+                s.onload=()=>res(); s.onerror=()=>rej(new Error("Failed to load PDF.js"))
+                document.head.appendChild(s)
+              })
+            }
+            const pdfjs=(window as unknown as Record<string,unknown>).pdfjsLib as {
+              GlobalWorkerOptions:{workerSrc:string}
+              getDocument:(o:{data:ArrayBuffer})=>{promise:Promise<{numPages:number;getPage:(n:number)=>Promise<{
+                getViewport:(o:{scale:number})=>{height:number}
+                getTextContent:(o:{normalizeWhitespace:boolean})=>Promise<{items:{str:string;transform:number[];height:number}[]}>
+              }>}>}
+            }
+            pdfjs.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"
+
+            const ab=await file.arrayBuffer()
+            const pdf=await pdfjs.getDocument({data:ab}).promise
+
+            let fullText=""
+            for(let p=1;p<=pdf.numPages;p++){
+              const page=await pdf.getPage(p)
+              const vp=page.getViewport({scale:1})
+              const tc=await page.getTextContent({normalizeWhitespace:false})
+              const items=tc.items
+                .filter(it=>it.str&&it.str.trim())
+                .map(it=>({str:it.str.trim(),x:it.transform[4],y:vp.height-it.transform[5],h:Math.abs(it.height)||10}))
+              items.sort((a,b)=>{const dy=a.y-b.y;if(Math.abs(dy)>3)return dy;return b.x-a.x})
+              type Blk={y:number;h:number;items:{str:string;x:number;y:number}[]}
+              const blocks:Blk[]=[]
+              for(const item of items){
+                const last=blocks[blocks.length-1]
+                if(!last||item.y-last.y>last.h*1.5)blocks.push({y:item.y,h:item.h,items:[item]})
+                else last.items.push(item)
+              }
+              for(const block of blocks){
+                const lm=new Map<number,{str:string;x:number}[]>()
+                for(const it of block.items){const yk=Math.round(it.y/3)*3;if(!lm.has(yk))lm.set(yk,[]);lm.get(yk)!.push(it)}
+                const lines=[...lm.entries()].sort(([a],[b])=>a-b).map(([,its])=>{its.sort((a,b)=>b.x-a.x);return its.map(i=>i.str).join(" ")})
+                fullText+=lines.join("\n")+"\n\n"
+              }
+              fullText+="\f"
+            }
+
+            const SEP=/\. \n\n\. \n\n\. \n\n\. \n\n\. \n\n/
+            const groups=fullText.split(SEP)
+            const texMap:Record<string,Textile>={}
+            for(const t of textiles)texMap[t.code]=t
+            const exKeys=new Set(orders.map(o=>dupKey(o.textileCode,o.orderDate||"",o.orderNumber||"")))
+
+            function gv(s:string):string[]{return s.split("\n").map(v=>v.trim()).filter(v=>v)}
+            function pk(a:string[],i:number):string{return a.length?(i<a.length?a[i]:a[0]):""}
+
+            const rows:ImportRow[]=[]
+            for(const g of groups){
+              const g2=g.trim();if(!g2)continue
+              const parts=g2.split("\n\n").map(p=>p.trim()).filter(p=>p)
+              if(parts.length<8)continue
+              let icIdx=-1
+              for(let i=0;i<parts.length;i++){
+                const v=gv(parts[i])
+                if(v.length>0&&v.every(x=>/^0{3}\d{3,4}$/.test(x))){icIdx=i;break}
+              }
+              if(icIdx<7)continue
+              const icV=gv(parts[icIdx]),tnV=gv(parts[icIdx-1]),pcV=gv(parts[icIdx-2])
+              const ccV=gv(parts[icIdx-4]),colV=gv(parts[icIdx-5]),stV=gv(parts[icIdx-6]),onV=gv(parts[icIdx-7])
+              const dates:string[]=[]
+              for(const dp of parts.slice(0,icIdx-7))for(const v of gv(dp))if(/^\d{4}\/\d{2}\/\d{2}$/.test(v))dates.push(v)
+              const qtyV:number[]=[]
+              if(icIdx+1<parts.length){
+                const qb=parts[icIdx+1]
+                const emb=qb.match(/(\d{4}\/\d{2}\/\d{2})/)
+                if(emb&&!dates.includes(emb[1]))dates.push(emb[1])
+                const raw=(qb.match(/\b\d+\.\d{2}\b/g)||[]).map(Number).filter(n=>n>0)
+                if(raw.length>1&&Math.abs(raw[raw.length-1]-raw.slice(0,-1).reduce((a,b)=>a+b,0))<0.01)raw.pop()
+                qtyV.push(...raw.map(q=>Math.ceil(q)))
+              }
+              const n=icV.length
+              for(let i=0;i<n;i++){
+                const ic=pk(icV,i);if(!/^0{3}\d{3,4}$/.test(ic))continue
+                const on=pk(onV,i),store=normStore(pk(stV,i)),color=normAr(pk(colV,i))
+                const cc=(pk(ccV,i).replace(/\D/g,"")||"01").padStart(2,"0")
+                const pc=(pk(pcV,i).replace(/\D/g,"")||"01").padStart(2,"0")
+                const tn=normAr(pk(tnV,i));const qty=qtyV.length?(qtyV[i]??qtyV[0]):0
+                let due="",ordered=""
+                if(dates.length>=2*n){due=dates[i*2];ordered=dates[i*2+1]}
+                else if(dates.length>=2){due=dates[0];ordered=dates[1]}
+                else if(dates.length){due=ordered=dates[0]}
+                due=due.replace(/\//g,"-");ordered=ordered.replace(/\//g,"-")
+                const appCode=`${parseInt(ic,10)}/${pc}/${cc}`
+                const dk=dupKey(appCode,ordered,on)
+                const tex=texMap[appCode]||null
+                const status:ImportRow["status"]=!tex?"no-textile":exKeys.has(dk)?"duplicate":"new"
+                rows.push({appCode,textileName:tn,color,qty,store,ordered,due,orderNum:on,status,tex})
+              }
+            }
+            return rows
+          }
+
+          async function handleImportFile(e:React.ChangeEvent<HTMLInputElement>){
+            const file=e.target.files?.[0];if(!file)return
+            setImportStatus("parsing");setImportLog([`Reading ${file.name}...`])
+            try{
+              const rows=await parsePDF(file)
+              setImportRows(rows)
+              setImportSelected(new Set(rows.map((_,i)=>i).filter(i=>rows[i].status==="new")))
+              setImportStatus("preview")
+              setImportLog([`Found ${rows.length} rows`])
+            }catch(err){setImportStatus("idle");setImportLog([`Error: ${String(err)}`])}
+            e.target.value=""
+          }
+
+          async function doImport(){
+            const sel=[...importSelected].map(i=>importRows[i]).filter(r=>r.status==="new"&&r.tex)
+            if(!sel.length)return
+            setImportStatus("importing")
+            const log:string[]=[]
+            for(let i=0;i<sel.length;i++){
+              const r=sel[i]
+              const newOrder:Order={
+                id:Date.now()+i,textileCode:r.appCode,textileName:r.tex!.name,
+                color:r.color,fabricType:r.tex!.fabricType,quantity:r.qty,
+                deadline:r.due,orderDate:r.ordered,priority:"Normal",
+                machineCategories:r.tex!.machineCategories,warpStatus:"not-started",
+                notes:"",orderNumber:r.orderNum,store:r.store,warpClosed:false,
+              }
+              setOrders(p=>[...p,newOrder])
+              await dbUpsert("orders",newOrder as unknown as Record<string,unknown>)
+              log.push(`✓ ${r.appCode} · ${r.tex!.name} · ${r.color} · ${r.qty}m`)
+              setImportProgress(Math.round((i+1)/sel.length*100))
+              setImportLog([...log])
+            }
+            setImportStatus("done")
+            setImportLog([...log,"",`✅ Done: ${sel.length} orders imported`])
+          }
+
+          const newCount=importRows.filter(r=>r.status==="new").length
+          const dupCount=importRows.filter(r=>r.status==="duplicate").length
+          const noTexCount=importRows.filter(r=>r.status==="no-textile").length
+          const pdfKeys=new Set(importRows.map(r=>dupKey(r.appCode,r.ordered,r.orderNum)))
+          const possiblyDone=(importStatus==="preview"||importStatus==="done")
+            ?orders.filter(o=>o.warpStatus!=="done"&&!pdfKeys.has(dupKey(o.textileCode,o.orderDate||"",o.orderNumber||"")))
+            :[]
+
+          return (
+            <div style={S.viewPad} className="dtx-viewpad">
+              <div style={S.card}>
+                <div style={S.cHead} className="dtx-chead">
+                  <span style={S.cTitle}>📥 Import orders from PDF</span>
+                  <span style={S.cSub}>عرض حجوزات الفروع للتصنيع</span>
+                  {importStatus!=="idle"&&<button style={{...S.btnSm,marginLeft:"auto"}} onClick={()=>{setImportStatus("idle");setImportRows([]);setImportLog([]);setImportProgress(0)}}>← Start over</button>}
+                </div>
+                <div style={S.cBody}>
+
+                  {importStatus==="idle"&&(
+                    <div>
+                      <div
+                        style={{border:"2px dashed #c4c0f0",borderRadius:12,padding:40,textAlign:"center",cursor:"pointer",marginBottom:16}}
+                        onClick={()=>document.getElementById("pdf-inp")?.click()}>
+                        <div style={{fontSize:40,marginBottom:12}}>📄</div>
+                        <div style={{fontSize:14,color:"#555",marginBottom:4}}>Click to upload your PDF</div>
+                        <div style={{fontSize:12,color:"#aaa"}}>عرض حجوزات الفروع للتصنيع</div>
+                      </div>
+                      <input id="pdf-inp" type="file" accept=".pdf" style={{display:"none"}} onChange={handleImportFile}/>
+                      <div style={{fontSize:12,color:"#888",padding:"10px 14px",background:"#f9f9f9",borderRadius:8,lineHeight:1.8}}>
+                        <strong>How it works:</strong> App code = ك.الصنف / ك.رسمه / ك.اللون<br/>
+                        e.g. 000765 + 01 + 04 → 765/01/04<br/>
+                        Duplicate check: textile code + order date + order number
+                      </div>
+                    </div>
+                  )}
+
+                  {importStatus==="parsing"&&(
+                    <div style={{textAlign:"center",padding:40}}>
+                      <div style={{fontSize:32,marginBottom:12}}>⏳</div>
+                      <div style={{fontSize:14,color:"#555"}}>Reading PDF...</div>
+                    </div>
+                  )}
+
+                  {(importStatus==="preview"||importStatus==="importing"||importStatus==="done")&&(
+                    <div>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}} className="dtx-metrics">
+                        {[{l:"New",v:newCount,c:"#166534",b:"#EDFBEE"},{l:"Duplicates",v:dupCount,c:"#aaa",b:"#f5f5f5"},
+                          {l:"No textile",v:noTexCount,c:"#92400E",b:"#FEF3C7"},{l:"Check if done",v:possiblyDone.length,c:"#A32D2D",b:"#FEEBEB"}
+                        ].map(({l,v,c,b})=>(
+                          <div key={l} style={{background:b,borderRadius:8,padding:"10px 14px"}}>
+                            <div style={{fontSize:11,color:c,marginBottom:2}}>{l}</div>
+                            <div style={{fontSize:22,fontWeight:700,color:c}}>{v}</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {importLog.length>0&&(
+                        <div style={{background:"#f5f5f5",borderRadius:8,padding:"10px 14px",marginBottom:12,fontFamily:"monospace",fontSize:12,maxHeight:120,overflowY:"auto"}}>
+                          {importLog.map((l,i)=><div key={i} style={{color:l.startsWith("✓")||l.startsWith("✅")?"#166534":"#555"}}>{l}</div>)}
+                        </div>
+                      )}
+
+                      {importStatus==="importing"&&(
+                        <div style={{height:6,background:"#e5e5e5",borderRadius:3,marginBottom:12,overflow:"hidden"}}>
+                          <div style={{height:"100%",background:"#7F77DD",borderRadius:3,width:`${importProgress}%`,transition:"width 0.2s"}}/>
+                        </div>
+                      )}
+
+                      <div style={{maxHeight:320,overflowY:"auto",border:"0.5px solid #e5e5e5",borderRadius:8,marginBottom:12}}>
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,tableLayout:"fixed"}}>
+                          <thead>
+                            <tr style={{background:"#f5f5f5",position:"sticky" as CSSProperties["position"],top:0}}>
+                              <th style={{padding:"7px 8px",width:28}}>
+                                <input type="checkbox" onChange={e=>{
+                                  if(e.target.checked)setImportSelected(new Set(importRows.map((_,i)=>i).filter(i=>importRows[i].status==="new")))
+                                  else setImportSelected(new Set())
+                                }}/>
+                              </th>
+                              {["Status","Code","Name","Color","Qty","Order date","Due","Store"].map(h=>(
+                                <th key={h} style={{padding:"7px 8px",textAlign:"right",color:"#555",fontWeight:500,fontSize:11}}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {importRows.map((r,i)=>(
+                              <tr key={i} style={{background:r.status==="duplicate"?"#fafafa":r.status==="no-textile"?"#FFFBEB":"transparent",borderBottom:"0.5px solid #f5f5f5"}}>
+                                <td style={{padding:"6px 8px"}}>
+                                  <input type="checkbox" checked={importSelected.has(i)} disabled={r.status!=="new"}
+                                    onChange={e=>{const s=new Set(importSelected);e.target.checked?s.add(i):s.delete(i);setImportSelected(s)}}/>
+                                </td>
+                                <td style={{padding:"6px 8px"}}>
+                                  <span style={{background:r.status==="new"?"#EDFBEE":r.status==="duplicate"?"#f5f5f5":"#FEF3C7",
+                                    color:r.status==="new"?"#166534":r.status==="duplicate"?"#aaa":"#92400E",
+                                    borderRadius:20,padding:"2px 7px",fontSize:11,fontWeight:500}}>
+                                    {r.status==="no-textile"?"no textile":r.status}
+                                  </span>
+                                </td>
+                                <td style={{padding:"6px 8px",fontWeight:600,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.appCode}</td>
+                                <td style={{padding:"6px 8px",color:"#555",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} dir="auto">{r.tex?r.tex.name:r.textileName||"—"}</td>
+                                <td style={{padding:"6px 8px",overflow:"hidden"}} dir="auto">{r.color}</td>
+                                <td style={{padding:"6px 8px",fontWeight:600,color:"#534AB7"}}>{r.qty}m</td>
+                                <td style={{padding:"6px 8px",color:"#aaa",fontSize:11}}>{r.ordered}</td>
+                                <td style={{padding:"6px 8px",color:"#aaa",fontSize:11}}>{r.due}</td>
+                                <td style={{padding:"6px 8px",fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} dir="auto">{r.store}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {possiblyDone.length>0&&(
+                        <div style={{background:"#FEEBEB",borderRadius:8,padding:"12px 14px",marginBottom:12}}>
+                          <div style={{fontWeight:600,color:"#A32D2D",marginBottom:6,fontSize:13}}>🔴 Check if done — {possiblyDone.length} active orders not in this PDF</div>
+                          <div style={{fontSize:12,color:"#A32D2D",marginBottom:6}}>These are active in your app but don't appear in this PDF. Check if completed.</div>
+                          {possiblyDone.slice(0,15).map(o=>(
+                            <div key={o.id} style={{fontSize:11,padding:"2px 0",fontFamily:"monospace"}} dir="auto">
+                              {o.textileCode} · {o.textileName||""} · {o.color} · {o.quantity}m · ordered {o.orderDate||"—"}
+                            </div>
+                          ))}
+                          {possiblyDone.length>15&&<div style={{fontSize:11,color:"#aaa",marginTop:4}}>...and {possiblyDone.length-15} more</div>}
+                        </div>
+                      )}
+
+                      {noTexCount>0&&(
+                        <div style={{background:"#FEF3C7",borderRadius:8,padding:"12px 14px",marginBottom:12}}>
+                          <div style={{fontWeight:600,color:"#92400E",marginBottom:6,fontSize:13}}>⚠️ {noTexCount} orders skipped — add these textiles first</div>
+                          {importRows.filter(r=>r.status==="no-textile").map((r,i)=>(
+                            <div key={i} style={{fontSize:11,color:"#92400E",fontFamily:"monospace"}}>
+                              Code: {r.appCode} · {r.color} · {r.qty}m · {r.store}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {importStatus==="preview"&&(
+                        <div style={{display:"flex",gap:8}}>
+                          <button style={{...S.btnPrimary,opacity:importSelected.size===0?0.5:1}} onClick={doImport} disabled={importSelected.size===0}>
+                            ✓ Import {importSelected.size} selected orders
+                          </button>
+                          <input id="pdf-inp2" type="file" accept=".pdf" style={{display:"none"}} onChange={handleImportFile}/>
+                          <button style={S.btnSm} onClick={()=>document.getElementById("pdf-inp2")?.click()}>Upload different PDF</button>
+                        </div>
+                      )}
+                      {importStatus==="done"&&(
+                        <div>
+                          <input id="pdf-inp3" type="file" accept=".pdf" style={{display:"none"}} onChange={handleImportFile}/>
+                          <button style={{...S.btnSm,background:"#EDFBEE",color:"#166534",border:"0.5px solid #86EFAC"}}
+                            onClick={()=>document.getElementById("pdf-inp3")?.click()}>📄 Import another PDF</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           )
         })()}
