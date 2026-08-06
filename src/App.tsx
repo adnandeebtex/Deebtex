@@ -3505,28 +3505,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
         {/* ── IMPORT VIEW ───────────────────────────────── */}
         {view==="import" && (()=>{
-          const STORE_PAIRS: [string,string][] = [
-            ["دمياط 2","دمياط ٢"],["دمياط","دمياط"],["سموحة","سموحة"],
-            ["العطارين","العطارين"],["الدقى","الدقي"],["الدقي","الدقي"],
-            ["لوران","لوران"],["العبور","العبور"],["عباس العقاد","عباس العقاد"],
-          ]
-          function normAr(s:string):string {
-            return (s||"")
-              .replace(/[\u064A\u06CC\u0649\u06D2]/g,"\u064A")
-              .replace(/[\u0622\u0623\u0625\u0671]/g,"\u0627")
-              .replace(/\u0640/g,"").trim()
-          }
-          function normStore(s:string):string {
-            const n=normAr(s)
-            for(const[k,v]of STORE_PAIRS){if(n.includes(normAr(k)))return v}
-            return s.trim()
-          }
-          function dupKey(code:string,ordered:string,orderNum:string):string {
-            return `${code}||${ordered}||${orderNum.trim()}`
-          }
-
           async function parsePDF(file:File) {
-            // Load PDF.js dynamically if not already loaded
+            // Load PDF.js dynamically
             if(!(window as unknown as Record<string,unknown>).pdfjsLib) {
               await new Promise<void>((res,rej)=>{
                 const s=document.createElement("script")
@@ -3538,91 +3518,131 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             const pdfjs=(window as unknown as Record<string,unknown>).pdfjsLib as {
               GlobalWorkerOptions:{workerSrc:string}
               getDocument:(o:{data:ArrayBuffer})=>{promise:Promise<{numPages:number;getPage:(n:number)=>Promise<{
-                getViewport:(o:{scale:number})=>{height:number}
-                getTextContent:(o:{normalizeWhitespace:boolean})=>Promise<{items:{str:string;transform:number[];height:number}[]}>
+                getTextContent:(o:{normalizeWhitespace:boolean})=>Promise<{items:{str:string}[]}>
               }>}>}
             }
             pdfjs.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"
 
+            // Extract raw text using PDF.js (same as pdfminer default mode)
             const ab=await file.arrayBuffer()
             const pdf=await pdfjs.getDocument({data:ab}).promise
-
             let fullText=""
             for(let p=1;p<=pdf.numPages;p++){
               const page=await pdf.getPage(p)
-              const vp=page.getViewport({scale:1})
               const tc=await page.getTextContent({normalizeWhitespace:false})
-              const items=tc.items
-                .filter(it=>it.str&&it.str.trim())
-                .map(it=>({str:it.str.trim(),x:it.transform[4],y:vp.height-it.transform[5],h:Math.abs(it.height)||10}))
-              items.sort((a,b)=>{const dy=a.y-b.y;if(Math.abs(dy)>3)return dy;return b.x-a.x})
-              type Blk={y:number;h:number;items:{str:string;x:number;y:number}[]}
-              const blocks:Blk[]=[]
-              for(const item of items){
-                const last=blocks[blocks.length-1]
-                if(!last||item.y-last.y>last.h*1.5)blocks.push({y:item.y,h:item.h,items:[item]})
-                else last.items.push(item)
-              }
-              for(const block of blocks){
-                const lm=new Map<number,{str:string;x:number}[]>()
-                for(const it of block.items){const yk=Math.round(it.y/3)*3;if(!lm.has(yk))lm.set(yk,[]);lm.get(yk)!.push(it)}
-                const lines=[...lm.entries()].sort(([a],[b])=>a-b).map(([,its])=>{its.sort((a,b)=>b.x-a.x);return its.map(i=>i.str).join(" ")})
-                fullText+=lines.join("\n")+"\n\n"
-              }
-              fullText+="\f"
+              fullText+=tc.items.map((it:{str:string})=>it.str).join("")+"\n"
             }
 
-            const SEP=/\. \n\n\. \n\n\. \n\n\. \n\n\. \n\n/
-            const groups=fullText.split(SEP)
+            // This PDF separates row groups with the reversed Arabic total line:
+            // إجمالي الصنف المحجوز (stored reversed as زوـجحملا فنصلا ىلاـمجإ)
+            const SEP="زوـــجحملا فنــــــصلا ىلاـــــــــــمجإ"
+            // Also strip column headers that repeat between groups
+            const HEADER=/زجحلا نذا[\s\S]*?فنصلا \.ك/g
+            // Strip page headers
+            const PAGEHDR=/\d{4}\/\d{2}\/\d{2}[\s\S]*?ةحفصلا مقر/g
+
+            // Re-extract with \n\n separators (pdfminer style) using text blocks
+            // Since PDF.js gives us a flat string, we need to reconstruct the \n\n structure
+            // Use the known text block separators from the PDF
+            let structuredText=""
+            for(let p=1;p<=pdf.numPages;p++){
+              const page=await pdf.getPage(p)
+              const tc=await page.getTextContent({normalizeWhitespace:false})
+              // Group items: each item that has a space before it is a new block
+              let block=""
+              for(const it of tc.items as {str:string;hasEOL?:boolean}[]){
+                if(it.hasEOL){
+                  if(block.trim())structuredText+=block.trim()+"\n\n"
+                  block=""
+                } else {
+                  block+=it.str
+                }
+              }
+              if(block.trim())structuredText+=block.trim()+"\n\n"
+            }
+
+            // Split by the total separator
+            const groups=structuredText.split(SEP)
+
             const texMap:Record<string,Textile>={}
             for(const t of textiles)texMap[t.code]=t
-            const exKeys=new Set(orders.map(o=>dupKey(o.textileCode,o.orderDate||"",o.orderNumber||"")))
+            const exKeys=new Set(orders.map(o=>
+              `${o.textileCode}||${o.orderDate||""}||${o.quantity}||${o.orderNumber||""}`
+            ))
 
-            function gv(s:string):string[]{return s.split("\n").map(v=>v.trim()).filter(v=>v)}
-            function pk(a:string[],i:number):string{return a.length?(i<a.length?a[i]:a[0]):""}
+            function pk2(arr:string[],i:number):string{
+              return arr.length?(i<arr.length?arr[i]:arr[0]):""
+            }
 
             const rows:ImportRow[]=[]
+
             for(const g of groups){
-              const g2=g.trim();if(!g2)continue
+              let g2=g
+                .replace(HEADER,"")
+                .replace(PAGEHDR,"")
+                .trim()
+              if(!g2)continue
+
               const parts=g2.split("\n\n").map(p=>p.trim()).filter(p=>p)
-              if(parts.length<8)continue
-              let icIdx=-1
-              for(let i=0;i<parts.length;i++){
-                const v=gv(parts[i])
-                if(v.length>0&&v.every(x=>/^0{3}\d{3,4}$/.test(x))){icIdx=i;break}
+              if(parts.length<11)continue
+
+              // Count rows (n) by item codes at end (alternating with texNames)
+              let icCount=0
+              let i=parts.length-1
+              while(i>=1){
+                if(/^0{3}\d{3,4}$/.test(parts[i])){
+                  icCount++; i-=2
+                } else break
               }
-              if(icIdx<7)continue
-              const icV=gv(parts[icIdx]),tnV=gv(parts[icIdx-1]),pcV=gv(parts[icIdx-2])
-              const ccV=gv(parts[icIdx-4]),colV=gv(parts[icIdx-5]),stV=gv(parts[icIdx-6]),onV=gv(parts[icIdx-7])
-              const dates:string[]=[]
-              for(const dp of parts.slice(0,icIdx-7))for(const v of gv(dp))if(/^\d{4}\/\d{2}\/\d{2}$/.test(v))dates.push(v)
-              const qtyV:number[]=[]
-              if(icIdx+1<parts.length){
-                const qb=parts[icIdx+1]
-                const emb=qb.match(/(\d{4}\/\d{2}\/\d{2})/)
-                if(emb&&!dates.includes(emb[1]))dates.push(emb[1])
-                const raw=(qb.match(/\b\d+\.\d{2}\b/g)||[]).map(Number).filter(n=>n>0)
-                if(raw.length>1&&Math.abs(raw[raw.length-1]-raw.slice(0,-1).reduce((a,b)=>a+b,0))<0.01)raw.pop()
-                qtyV.push(...raw.map(q=>Math.ceil(q)))
+              if(!icCount)continue
+              const n=icCount
+              if(parts.length<11*n)continue
+
+              // Take last 11n parts to normalize
+              const P=parts.slice(-11*n)
+
+              // Extract columns by fixed positions:
+              const onVals  = P.slice(0,n)
+              const dueVals = Array.from({length:n},(_,i)=>P[2*n+2*i])
+              const ordVals = Array.from({length:n},(_,i)=>P[2*n+2*i+1])
+
+              // Qty: parts [4n..5n-1]
+              const qtyNums:number[]=[]
+              for(const qp of P.slice(4*n,5*n)){
+                const matches=qp.match(/\b\d+\.\d{2}\b/g)||[]
+                for(const m of matches)qtyNums.push(parseFloat(m))
               }
-              const n=icV.length
+              if(qtyNums.length>n&&Math.abs(qtyNums[qtyNums.length-1]-qtyNums.slice(0,-1).reduce((a,b)=>a+b,0))<0.01)
+                qtyNums.pop()
+
+              const ccVals = P.slice(6*n,7*n)
+              const pcVals = P.slice(8*n,9*n)
+              const icVals = Array.from({length:n},(_,i)=>P[9*n+2*i+1])
+
               for(let i=0;i<n;i++){
-                const ic=pk(icV,i);if(!/^0{3}\d{3,4}$/.test(ic))continue
-                const on=pk(onV,i),store=normStore(pk(stV,i)),color=normAr(pk(colV,i))
-                const cc=(pk(ccV,i).replace(/\D/g,"")||"01").padStart(2,"0")
-                const pc=(pk(pcV,i).replace(/\D/g,"")||"01").padStart(2,"0")
-                const tn=normAr(pk(tnV,i));const qty=qtyV.length?(qtyV[i]??qtyV[0]):0
-                let due="",ordered=""
-                if(dates.length>=2*n){due=dates[i*2];ordered=dates[i*2+1]}
-                else if(dates.length>=2){due=dates[0];ordered=dates[1]}
-                else if(dates.length){due=ordered=dates[0]}
-                due=due.replace(/\//g,"-");ordered=ordered.replace(/\//g,"-")
+                const ic=icVals[i]||""
+                if(!/^0{3}\d{3,4}$/.test(ic))continue
+                const on  =pk2(onVals,i)
+                const cc  =(pk2(ccVals,i).replace(/\D/g,"")||"01").padStart(2,"0")
+                const pc  =(pk2(pcVals,i).replace(/\D/g,"")||"01").padStart(2,"0")
+                const qty =qtyNums.length>i?Math.ceil(qtyNums[i]):0
+                let ordered=(pk2(ordVals,i)||"").replace(/\//g,"-")
+                let due    =(pk2(dueVals,i)||"").replace(/\//g,"-")
+                if(!/^\d{4}-\d{2}-\d{2}$/.test(ordered))ordered=due
+                if(!/^\d{4}-\d{2}-\d{2}$/.test(due))due=ordered
+                if(!on||qty===0)continue
                 const appCode=`${parseInt(ic,10)}/${pc}/${cc}`
-                const dk=dupKey(appCode,ordered,on)
+                if(!/^\d+\/\d{2}\/\d{2}$/.test(appCode))continue
+                const dk=`${appCode}||${ordered}||${qty}||${on.trim()}`
                 const tex=texMap[appCode]||null
                 const status:ImportRow["status"]=!tex?"no-textile":exKeys.has(dk)?"duplicate":"new"
-                rows.push({appCode,textileName:tn,color,qty,store,ordered,due,orderNum:on,status,tex})
+                rows.push({appCode,textileName:"",color:"",qty,store:"",ordered,due,orderNum:on,status,tex})
               }
+            }
+
+            // If we got 0 rows, the hasEOL approach didn't work - try simple line split
+            if(rows.length===0){
+              throw new Error(`Parser found 0 orders. The PDF may have a different format than expected.`)
             }
             return rows
           }
@@ -3667,9 +3687,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           const newCount=importRows.filter(r=>r.status==="new").length
           const dupCount=importRows.filter(r=>r.status==="duplicate").length
           const noTexCount=importRows.filter(r=>r.status==="no-textile").length
-          const pdfKeys=new Set(importRows.map(r=>dupKey(r.appCode,r.ordered,r.orderNum)))
+          const pdfKeys=new Set(importRows.map(r=>`${r.appCode}||${r.ordered}||${r.qty}||${r.orderNum.trim()}`))
           const possiblyDone=(importStatus==="preview"||importStatus==="done")
-            ?orders.filter(o=>o.warpStatus!=="done"&&!pdfKeys.has(dupKey(o.textileCode,o.orderDate||"",o.orderNumber||"")))
+            ?orders.filter(o=>o.warpStatus!=="done"&&!pdfKeys.has(`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`))
             :[]
 
           return (
