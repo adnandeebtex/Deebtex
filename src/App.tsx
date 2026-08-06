@@ -3506,87 +3506,147 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         {/* ── IMPORT VIEW ───────────────────────────────── */}
         {view==="import" && (()=>{
           async function parsePDF(file:File) {
-            // Load PDF.js dynamically
+            // Load PDF.js
             if(!(window as unknown as Record<string,unknown>).pdfjsLib) {
               await new Promise<void>((res,rej)=>{
                 const s=document.createElement("script")
                 s.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
-                s.onload=()=>res(); s.onerror=()=>rej(new Error("Failed to load PDF.js"))
+                s.onload=()=>res()
+                s.onerror=()=>rej(new Error("Failed to load PDF.js"))
                 document.head.appendChild(s)
               })
             }
             const pdfjs=(window as unknown as Record<string,unknown>).pdfjsLib as {
               GlobalWorkerOptions:{workerSrc:string}
-              getDocument:(o:{data:ArrayBuffer})=>{promise:Promise<{numPages:number;getPage:(n:number)=>Promise<{
-                getTextContent:(o:{normalizeWhitespace:boolean})=>Promise<{items:{str:string}[]}>
-              }>}>}
+              getDocument:(o:{data:ArrayBuffer})=>{promise:Promise<{
+                numPages:number
+                getPage:(n:number)=>Promise<{
+                  getViewport:(o:{scale:number})=>{height:number;width:number}
+                  getTextContent:(o:{normalizeWhitespace:boolean})=>Promise<{
+                    items:{str:string;transform:number[];width:number;height:number}[]
+                  }>
+                }>
+              }>}
             }
             pdfjs.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"
 
-            // Extract raw text using PDF.js (same as pdfminer default mode)
             const ab=await file.arrayBuffer()
             const pdf=await pdfjs.getDocument({data:ab}).promise
+
+            // Reconstruct pdfminer-style \n\n-separated text blocks
+            // Each block = one text box in PDF = items at same Y with no large X gap
             let fullText=""
+
             for(let p=1;p<=pdf.numPages;p++){
               const page=await pdf.getPage(p)
+              const vp=page.getViewport({scale:1})
               const tc=await page.getTextContent({normalizeWhitespace:false})
-              fullText+=tc.items.map((it:{str:string})=>it.str).join("")+"\n"
-            }
 
-            // This PDF separates row groups with the reversed Arabic total line:
-            // إجمالي الصنف المحجوز (stored reversed as زوـجحملا فنصلا ىلاـمجإ)
-            const SEP="زوـــجحملا فنــــــصلا ىلاـــــــــــمجإ"
-            // Also strip column headers that repeat between groups
-            const HEADER=/زجحلا نذا[\s\S]*?فنصلا \.ك/g
-            // Strip page headers
-            const PAGEHDR=/\d{4}\/\d{2}\/\d{2}[\s\S]*?ةحفصلا مقر/g
+              // Convert items to {str, x, y, w} with y measured from top
+              type Item={str:string;x:number;y:number;w:number;h:number}
+              const items:Item[]=tc.items
+                .filter(it=>it.str.trim())
+                .map(it=>({
+                  str:it.str,
+                  x:it.transform[4],
+                  y:vp.height-it.transform[5],
+                  w:it.width,
+                  h:Math.abs(it.height)||10,
+                }))
 
-            // Re-extract with \n\n separators (pdfminer style) using text blocks
-            // Since PDF.js gives us a flat string, we need to reconstruct the \n\n structure
-            // Use the known text block separators from the PDF
-            let structuredText=""
-            for(let p=1;p<=pdf.numPages;p++){
-              const page=await pdf.getPage(p)
-              const tc=await page.getTextContent({normalizeWhitespace:false})
-              // Group items: each item that has a space before it is a new block
-              let block=""
-              for(const it of tc.items as {str:string;hasEOL?:boolean}[]){
-                if(it.hasEOL){
-                  if(block.trim())structuredText+=block.trim()+"\n\n"
-                  block=""
+              // Sort by Y (top to bottom), then X descending (right to left = RTL Arabic)
+              items.sort((a,b)=>{
+                const dy=Math.round((a.y-b.y)*10)/10
+                if(Math.abs(dy)>2)return dy
+                return b.x-a.x
+              })
+
+              // Group items into text boxes:
+              // New box when: Y changes by more than lineHeight/2, OR large X gap between items on same line
+              type Box={y:number;x:number;w:number;h:number;parts:string[]}
+              const boxes:Box[]=[]
+
+              for(const item of items){
+                if(!item.str.trim())continue
+
+                // Find existing box this item belongs to
+                const sameYBox=boxes.find(b=>Math.abs(b.y-item.y)<=b.h*0.6)
+                if(sameYBox){
+                  // Check X gap — if gap > 3x char width, it's the same box (Arabic goes right to left)
+                  // In RTL, next item is to the LEFT of previous
+                  const lastX=sameYBox.x
+                  const gap=lastX-item.x-item.w  // gap between end of this item and start of last
+                  if(Math.abs(gap)<30){
+                    // Same box, prepend (RTL) or append
+                    sameYBox.parts.push(item.str)
+                    sameYBox.x=Math.min(sameYBox.x, item.x)
+                    sameYBox.w=sameYBox.x+sameYBox.w-item.x
+                  } else {
+                    // Large gap = new box on same line
+                    boxes.push({y:item.y,x:item.x,w:item.w,h:item.h,parts:[item.str]})
+                  }
                 } else {
-                  block+=it.str
+                  boxes.push({y:item.y,x:item.x,w:item.w,h:item.h,parts:[item.str]})
                 }
               }
-              if(block.trim())structuredText+=block.trim()+"\n\n"
+
+              // Sort boxes top-to-bottom (already sorted by Y since items were sorted)
+              boxes.sort((a,b)=>a.y-b.y)
+
+              // Each box becomes one \n\n-separated block
+              // Boxes on the same Y row get combined with space
+              // Group by Y proximity
+              const rows:Box[][]=[]
+              for(const box of boxes){
+                const row=rows.find(r=>r.length>0&&Math.abs(r[0].y-box.y)<=r[0].h*0.6)
+                if(row)row.push(box)
+                else rows.push([box])
+              }
+
+              for(const row of rows){
+                // Each item in the row is a separate text box = \n\n separator
+                row.sort((a,b)=>b.x-a.x) // right to left
+                for(const box of row){
+                  const text=box.parts.join("").trim()
+                  if(text)fullText+=text+"\n\n"
+                }
+              }
+              fullText+="\f" // page break
             }
 
-            // Split by the total separator
-            const groups=structuredText.split(SEP)
+            // Now parse using the proven Python logic
+            const SEP="زوـــجحملا فنــــــصلا ىلاـــــــــــمجإ"
+            const groups=fullText.split(SEP)
 
             const texMap:Record<string,Textile>={}
             for(const t of textiles)texMap[t.code]=t
-            const exKeys=new Set(orders.map(o=>
-              `${o.textileCode}||${o.orderDate||""}||${o.quantity}||${o.orderNumber||""}`
-            ))
+            const exKeys=new Set(
+              orders.map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`)
+            )
 
             function pk2(arr:string[],i:number):string{
               return arr.length?(i<arr.length?arr[i]:arr[0]):""
             }
 
+            // Strip column headers and page headers
+            function cleanGroup(g:string):string{
+              // Remove column header: زجحلا نذا ... فنصلا .ك
+              g=g.replace(/زجحلا نذا[\s\S]*?فنصلا \.ك\n\n/g,"")
+              // Remove page header: date/time block ending with ةحفصلا مقر
+              g=g.replace(/\d{4}\/\d{2}\/\d{2}[\s\S]*?ةحفصلا مقر\n\n/g,"")
+              return g.trim()
+            }
+
             const rows:ImportRow[]=[]
 
             for(const g of groups){
-              let g2=g
-                .replace(HEADER,"")
-                .replace(PAGEHDR,"")
-                .trim()
+              const g2=cleanGroup(g)
               if(!g2)continue
 
               const parts=g2.split("\n\n").map(p=>p.trim()).filter(p=>p)
               if(parts.length<11)continue
 
-              // Count rows (n) by item codes at end (alternating with texNames)
+              // Count rows by item codes at end (alternating with texNames)
               let icCount=0
               let i=parts.length-1
               while(i>=1){
@@ -3598,51 +3658,48 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               const n=icCount
               if(parts.length<11*n)continue
 
-              // Take last 11n parts to normalize
+              // Normalize: take last 11n parts
               const P=parts.slice(-11*n)
 
-              // Extract columns by fixed positions:
-              const onVals  = P.slice(0,n)
-              const dueVals = Array.from({length:n},(_,i)=>P[2*n+2*i])
-              const ordVals = Array.from({length:n},(_,i)=>P[2*n+2*i+1])
+              const onVals =P.slice(0,n)
+              const dueVals=Array.from({length:n},(_,i)=>P[2*n+2*i])
+              const ordVals=Array.from({length:n},(_,i)=>P[2*n+2*i+1])
 
-              // Qty: parts [4n..5n-1]
+              // Qty block [4n..5n-1]
               const qtyNums:number[]=[]
               for(const qp of P.slice(4*n,5*n)){
-                const matches=qp.match(/\b\d+\.\d{2}\b/g)||[]
-                for(const m of matches)qtyNums.push(parseFloat(m))
+                const ms=qp.match(/\b\d+[\.,]\d{2}\b/g)||[]
+                for(const m of ms)qtyNums.push(parseFloat(m.replace(",",".")))
               }
               if(qtyNums.length>n&&Math.abs(qtyNums[qtyNums.length-1]-qtyNums.slice(0,-1).reduce((a,b)=>a+b,0))<0.01)
                 qtyNums.pop()
 
-              const ccVals = P.slice(6*n,7*n)
-              const pcVals = P.slice(8*n,9*n)
-              const icVals = Array.from({length:n},(_,i)=>P[9*n+2*i+1])
+              const ccVals=P.slice(6*n,7*n)
+              const pcVals=P.slice(8*n,9*n)
+              const icVals=Array.from({length:n},(_,i)=>P[9*n+2*i+1])
 
               for(let i=0;i<n;i++){
                 const ic=icVals[i]||""
                 if(!/^0{3}\d{3,4}$/.test(ic))continue
-                const on  =pk2(onVals,i)
-                const cc  =(pk2(ccVals,i).replace(/\D/g,"")||"01").padStart(2,"0")
-                const pc  =(pk2(pcVals,i).replace(/\D/g,"")||"01").padStart(2,"0")
-                const qty =qtyNums.length>i?Math.ceil(qtyNums[i]):0
+                const on =pk2(onVals,i)
+                if(!on||!/^\d{6}$/.test(on))continue
+                const cc=(pk2(ccVals,i).replace(/\D/g,"")||"01").padStart(2,"0")
+                const pc=(pk2(pcVals,i).replace(/\D/g,"")||"01").padStart(2,"0")
+                const qty=qtyNums.length>i?Math.ceil(qtyNums[i]):0
+                if(qty===0)continue
                 let ordered=(pk2(ordVals,i)||"").replace(/\//g,"-")
                 let due    =(pk2(dueVals,i)||"").replace(/\//g,"-")
                 if(!/^\d{4}-\d{2}-\d{2}$/.test(ordered))ordered=due
                 if(!/^\d{4}-\d{2}-\d{2}$/.test(due))due=ordered
-                if(!on||qty===0)continue
+
                 const appCode=`${parseInt(ic,10)}/${pc}/${cc}`
                 if(!/^\d+\/\d{2}\/\d{2}$/.test(appCode))continue
+
                 const dk=`${appCode}||${ordered}||${qty}||${on.trim()}`
                 const tex=texMap[appCode]||null
                 const status:ImportRow["status"]=!tex?"no-textile":exKeys.has(dk)?"duplicate":"new"
-                rows.push({appCode,textileName:"",color:"",qty,store:"",ordered,due,orderNum:on,status,tex})
+                rows.push({appCode,textileName:tex?tex.name:"",color:"",qty,store:"",ordered,due,orderNum:on,status,tex})
               }
-            }
-
-            // If we got 0 rows, the hasEOL approach didn't work - try simple line split
-            if(rows.length===0){
-              throw new Error(`Parser found 0 orders. The PDF may have a different format than expected.`)
             }
             return rows
           }
@@ -3652,11 +3709,22 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             setImportStatus("parsing");setImportLog([`Reading ${file.name}...`])
             try{
               const rows=await parsePDF(file)
+              if(rows.length===0){
+                setImportStatus("idle")
+                setImportLog(["❌ No orders found in PDF. Check this is the correct PDF format."])
+                return
+              }
               setImportRows(rows)
               setImportSelected(new Set(rows.map((_,i)=>i).filter(i=>rows[i].status==="new")))
               setImportStatus("preview")
-              setImportLog([`Found ${rows.length} rows`])
-            }catch(err){setImportStatus("idle");setImportLog([`Error: ${String(err)}`])}
+              const nNew=rows.filter(r=>r.status==="new").length
+              const nDup=rows.filter(r=>r.status==="duplicate").length
+              const nNo=rows.filter(r=>r.status==="no-textile").length
+              setImportLog([`✓ Found ${rows.length} orders — ${nNew} new, ${nDup} duplicates, ${nNo} no textile`])
+            }catch(err){
+              setImportStatus("idle")
+              setImportLog([`❌ Error: ${String(err)}`])
+            }
             e.target.value=""
           }
 
@@ -3712,10 +3780,15 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                         <div style={{fontSize:12,color:"#aaa"}}>عرض حجوزات الفروع للتصنيع</div>
                       </div>
                       <input id="pdf-inp" type="file" accept=".pdf" style={{display:"none"}} onChange={handleImportFile}/>
+                      {importLog.length>0&&(
+                        <div style={{background:"#FEEBEB",borderRadius:8,padding:"12px 14px",marginBottom:12,fontSize:12,color:"#A32D2D",lineHeight:1.6}}>
+                          {importLog.map((l,i)=><div key={i}>{l}</div>)}
+                        </div>
+                      )}
                       <div style={{fontSize:12,color:"#888",padding:"10px 14px",background:"#f9f9f9",borderRadius:8,lineHeight:1.8}}>
                         <strong>How it works:</strong> App code = ك.الصنف / ك.رسمه / ك.اللون<br/>
                         e.g. 000765 + 01 + 04 → 765/01/04<br/>
-                        Duplicate check: textile code + order date + order number
+                        Duplicate check: code + order date + quantity + order number
                       </div>
                     </div>
                   )}
