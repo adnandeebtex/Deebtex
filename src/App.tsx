@@ -3533,8 +3533,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             const ab=await file.arrayBuffer()
             const pdf=await pdfjs.getDocument({data:ab}).promise
 
-            // Group PDF.js text items by Y position to reconstruct text boxes
-            // Each unique Y position = one text box = one \n\n-separated block (same as pdfminer)
+            // Extract all items from ALL pages with positions
             type TItem={str:string;x:number;y:number;page:number}
             const allItems:TItem[]=[]
 
@@ -3543,46 +3542,56 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               const vp=page.getViewport({scale:1})
               const tc=await page.getTextContent({normalizeWhitespace:false})
               for(const it of tc.items){
-                const s=it.str.trim()
-                if(!s) continue
+                const s=it.str  // keep spaces, don't trim yet
+                if(!s.trim()) continue
                 allItems.push({
                   str:s,
-                  x:it.transform[4],
-                  y:Math.round(vp.height-it.transform[5]), // flip Y: 0=top
-                  page:p-1,
+                  x:Math.round(it.transform[4]),
+                  y:Math.round(vp.height - it.transform[5]),
+                  page:p,
                 })
               }
             }
 
-            // Sort: page → Y top-to-bottom → X right-to-left (RTL Arabic)
+            // Sort: page → Y → X descending (RTL)
             allItems.sort((a,b)=>{
               if(a.page!==b.page) return a.page-b.page
-              if(Math.abs(a.y-b.y)>3) return a.y-b.y
+              if(a.y!==b.y) return a.y-b.y
               return b.x-a.x
             })
 
-            // Group items that are at the same Y position into one text box
-            // Items at same Y = same pdfminer text box → join with space
-            // Different Y = different text box → \n\n separator
-            type Box={y:number;page:number;text:string}
+            // Group into text boxes: same page + same Y = same box
+            type Box={y:number;page:number;str:string}
             const boxes:Box[]=[]
             for(const item of allItems){
               const last=boxes[boxes.length-1]
-              if(last&&last.page===item.page&&Math.abs(last.y-item.y)<=3){
-                last.text+=" "+item.str
+              if(last && last.page===item.page && Math.abs(last.y-item.y)<=2){
+                last.str += item.str
               } else {
-                boxes.push({y:item.y,page:item.page,text:item.str})
+                boxes.push({y:item.y, page:item.page, str:item.str})
               }
             }
 
-            const reconstructed=boxes.map(b=>b.text.trim()).filter(t=>t).join("\n\n")
+            // Build \n\n separated text
+            const fullText=boxes.map(b=>b.str.trim()).filter(t=>t).join("\n\n")
 
-            // Parse using the proven structure:
-            // Groups separated by "إجمالي الصنف المحجوز" (reversed in PDF)
+            // Check if SEP exists
             const SEP="زوـــجحملا فنــــــصلا ىلاـــــــــــمجإ"
-            const groups=reconstructed.split(SEP)
+            if(!fullText.includes(SEP)){
+              // Log first 2000 chars for debugging
+              console.log("FULL TEXT SAMPLE:", fullText.slice(0,2000))
+              console.log("SEP NOT FOUND. Looking for partial match...")
+              // Try partial
+              const partial="ىلاـــــ"
+              console.log("Partial found:", fullText.includes(partial))
+              // Log all unique chars around a known Arabic string
+              const idx=fullText.indexOf("000701")
+              if(idx>0) console.log("Context around 000701:", JSON.stringify(fullText.slice(idx-200,idx+100)))
+              throw new Error("PDF separator not found. Check browser console (F12) for debug info.")
+            }
 
-            // Known column header texts to strip
+            const groups=fullText.split(SEP)
+
             const HEADERS=new Set([
               "فنصلا .ك","فــنصلا","همسر .ك","ةمسرلا","نوللا .ك","نوــللا",
               "زجحلا .ت ةيمكلا","ميلستلا .ت","عرــــفلا","زجحلا نذا"
@@ -3598,56 +3607,44 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
             for(const g of groups){
               let parts=g.split("\n\n").map(p=>p.trim()).filter(p=>p)
-
-              // Strip known column headers from start
-              while(parts.length>0&&HEADERS.has(parts[0])) parts.shift()
-
-              // Skip any leading non-data parts until we hit a 000XXX item code
-              while(parts.length>0&&!/^0{3}\d{3,4}$/.test(parts[0])) parts.shift()
-
+              while(parts.length>0 && HEADERS.has(parts[0])) parts.shift()
+              while(parts.length>0 && !/^0{3}\d{3,4}$/.test(parts[0])) parts.shift()
               if(parts.length<11) continue
 
-              // Each row = 11 consecutive parts:
-              // [0]=itemCode  [1]=texName  [2]=patCode  [3]=patName  [4]=colorCode
-              // [5]=color     [6]=qty      [7]=orderDate [8]=dueDate  [9]=store  [10]=orderNum
-              // Multi-row groups: row 2 starts at [11], row 3 at [22], etc.
-
               let n=0
-              while(n*11<parts.length&&/^0{3}\d{3,4}$/.test(parts[n*11])) n++
+              while(n*11<parts.length && /^0{3}\d{3,4}$/.test(parts[n*11])) n++
               if(n===0) continue
 
               for(let i=0;i<n;i++){
                 const base=i*11
                 if(base+10>=parts.length) continue
-
                 const ic=parts[base+0]
                 if(!/^0{3}\d{3,4}$/.test(ic)) continue
-
-                const pc=(parts[base+2].replace(/\D/g,"")||"01").padStart(2,"0")  // patternCode
-                const cc=(parts[base+4].replace(/\D/g,"")||"01").padStart(2,"0")  // colorCode
+                const pc=(parts[base+2].replace(/\D/g,"")||"01").padStart(2,"0")
+                const cc=(parts[base+4].replace(/\D/g,"")||"01").padStart(2,"0")
                 const on=parts[base+10]
                 if(!/^\d{6}$/.test(on)) continue
-
-                // Qty: "100.00   100.00" → take first number
                 const qtyNums=(parts[base+6].match(/\b\d+\.\d+\b/g)||[]).map(Number)
                 if(!qtyNums.length) continue
                 const qty=Math.ceil(qtyNums[0])
                 if(qty===0) continue
-
                 let ordered=parts[base+7].replace(/\//g,"-")
                 let due    =parts[base+8].replace(/\//g,"-")
                 if(!/^\d{4}-\d{2}-\d{2}$/.test(ordered)) ordered=due
                 if(!/^\d{4}-\d{2}-\d{2}$/.test(due))     due=ordered
-
                 const appCode=`${parseInt(ic,10)}/${pc}/${cc}`
                 if(!/^\d+\/\d{2}\/\d{2}$/.test(appCode)) continue
-
                 const dk=`${appCode}||${ordered}||${qty}||${on.trim()}`
                 const tex=texMap[appCode]||null
                 const status:ImportRow["status"]=!tex?"no-textile":exKeys.has(dk)?"duplicate":"new"
-
                 rows.push({appCode,textileName:tex?tex.name:"",color:"",qty,store:"",ordered,due,orderNum:on,status,tex})
               }
+            }
+
+            if(rows.length===0){
+              console.log("Groups found:", groups.length)
+              console.log("Sample group 1:", groups[1]?.slice(0,500))
+              throw new Error(`Found ${groups.length} groups but parsed 0 orders. Check browser console (F12).`)
             }
             return rows
           }
