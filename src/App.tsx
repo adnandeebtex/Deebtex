@@ -3506,7 +3506,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         {/* ── IMPORT VIEW ───────────────────────────────── */}
         {view==="import" && (()=>{
           async function parsePDF(file:File) {
-            // Load PDF.js
+            // Load PDF.js dynamically
             if(!(window as unknown as Record<string,unknown>).pdfjsLib) {
               await new Promise<void>((res,rej)=>{
                 const s=document.createElement("script")
@@ -3533,171 +3533,119 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             const ab=await file.arrayBuffer()
             const pdf=await pdfjs.getDocument({data:ab}).promise
 
-            // Reconstruct pdfminer-style \n\n-separated text blocks
-            // Each block = one text box in PDF = items at same Y with no large X gap
-            let fullText=""
+            // Group PDF.js text items by Y position to reconstruct text boxes
+            // Each unique Y position = one text box = one \n\n-separated block (same as pdfminer)
+            type TItem={str:string;x:number;y:number;page:number}
+            const allItems:TItem[]=[]
 
             for(let p=1;p<=pdf.numPages;p++){
               const page=await pdf.getPage(p)
               const vp=page.getViewport({scale:1})
               const tc=await page.getTextContent({normalizeWhitespace:false})
-
-              // Convert items to {str, x, y, w} with y measured from top
-              type Item={str:string;x:number;y:number;w:number;h:number}
-              const items:Item[]=tc.items
-                .filter(it=>it.str.trim())
-                .map(it=>({
-                  str:it.str,
+              for(const it of tc.items){
+                const s=it.str.trim()
+                if(!s) continue
+                allItems.push({
+                  str:s,
                   x:it.transform[4],
-                  y:vp.height-it.transform[5],
-                  w:it.width,
-                  h:Math.abs(it.height)||10,
-                }))
-
-              // Sort by Y (top to bottom), then X descending (right to left = RTL Arabic)
-              items.sort((a,b)=>{
-                const dy=Math.round((a.y-b.y)*10)/10
-                if(Math.abs(dy)>2)return dy
-                return b.x-a.x
-              })
-
-              // Group items into text boxes:
-              // New box when: Y changes by more than lineHeight/2, OR large X gap between items on same line
-              type Box={y:number;x:number;w:number;h:number;parts:string[]}
-              const boxes:Box[]=[]
-
-              for(const item of items){
-                if(!item.str.trim())continue
-
-                // Find existing box this item belongs to
-                const sameYBox=boxes.find(b=>Math.abs(b.y-item.y)<=b.h*0.6)
-                if(sameYBox){
-                  // Check X gap — if gap > 3x char width, it's the same box (Arabic goes right to left)
-                  // In RTL, next item is to the LEFT of previous
-                  const lastX=sameYBox.x
-                  const gap=lastX-item.x-item.w  // gap between end of this item and start of last
-                  if(Math.abs(gap)<30){
-                    // Same box, prepend (RTL) or append
-                    sameYBox.parts.push(item.str)
-                    sameYBox.x=Math.min(sameYBox.x, item.x)
-                    sameYBox.w=sameYBox.x+sameYBox.w-item.x
-                  } else {
-                    // Large gap = new box on same line
-                    boxes.push({y:item.y,x:item.x,w:item.w,h:item.h,parts:[item.str]})
-                  }
-                } else {
-                  boxes.push({y:item.y,x:item.x,w:item.w,h:item.h,parts:[item.str]})
-                }
+                  y:Math.round(vp.height-it.transform[5]), // flip Y: 0=top
+                  page:p-1,
+                })
               }
-
-              // Sort boxes top-to-bottom (already sorted by Y since items were sorted)
-              boxes.sort((a,b)=>a.y-b.y)
-
-              // Each box becomes one \n\n-separated block
-              // Boxes on the same Y row get combined with space
-              // Group by Y proximity
-              const rows:Box[][]=[]
-              for(const box of boxes){
-                const row=rows.find(r=>r.length>0&&Math.abs(r[0].y-box.y)<=r[0].h*0.6)
-                if(row)row.push(box)
-                else rows.push([box])
-              }
-
-              for(const row of rows){
-                // Each item in the row is a separate text box = \n\n separator
-                row.sort((a,b)=>b.x-a.x) // right to left
-                for(const box of row){
-                  const text=box.parts.join("").trim()
-                  if(text)fullText+=text+"\n\n"
-                }
-              }
-              fullText+="\f" // page break
             }
 
-            // Now parse using the proven Python logic
+            // Sort: page → Y top-to-bottom → X right-to-left (RTL Arabic)
+            allItems.sort((a,b)=>{
+              if(a.page!==b.page) return a.page-b.page
+              if(Math.abs(a.y-b.y)>3) return a.y-b.y
+              return b.x-a.x
+            })
+
+            // Group items that are at the same Y position into one text box
+            // Items at same Y = same pdfminer text box → join with space
+            // Different Y = different text box → \n\n separator
+            type Box={y:number;page:number;text:string}
+            const boxes:Box[]=[]
+            for(const item of allItems){
+              const last=boxes[boxes.length-1]
+              if(last&&last.page===item.page&&Math.abs(last.y-item.y)<=3){
+                last.text+=" "+item.str
+              } else {
+                boxes.push({y:item.y,page:item.page,text:item.str})
+              }
+            }
+
+            const reconstructed=boxes.map(b=>b.text.trim()).filter(t=>t).join("\n\n")
+
+            // Parse using the proven structure:
+            // Groups separated by "إجمالي الصنف المحجوز" (reversed in PDF)
             const SEP="زوـــجحملا فنــــــصلا ىلاـــــــــــمجإ"
-            const groups=fullText.split(SEP)
+            const groups=reconstructed.split(SEP)
+
+            // Known column header texts to strip
+            const HEADERS=new Set([
+              "فنصلا .ك","فــنصلا","همسر .ك","ةمسرلا","نوللا .ك","نوــللا",
+              "زجحلا .ت ةيمكلا","ميلستلا .ت","عرــــفلا","زجحلا نذا"
+            ])
 
             const texMap:Record<string,Textile>={}
-            for(const t of textiles)texMap[t.code]=t
+            for(const t of textiles) texMap[t.code]=t
             const exKeys=new Set(
               orders.map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`)
             )
 
-            function pk2(arr:string[],i:number):string{
-              return arr.length?(i<arr.length?arr[i]:arr[0]):""
-            }
-
-            // Strip column headers and page headers
-            function cleanGroup(g:string):string{
-              // Remove column header: زجحلا نذا ... فنصلا .ك
-              g=g.replace(/زجحلا نذا[\s\S]*?فنصلا \.ك\n\n/g,"")
-              // Remove page header: date/time block ending with ةحفصلا مقر
-              g=g.replace(/\d{4}\/\d{2}\/\d{2}[\s\S]*?ةحفصلا مقر\n\n/g,"")
-              return g.trim()
-            }
-
             const rows:ImportRow[]=[]
 
             for(const g of groups){
-              const g2=cleanGroup(g)
-              if(!g2)continue
+              let parts=g.split("\n\n").map(p=>p.trim()).filter(p=>p)
 
-              const parts=g2.split("\n\n").map(p=>p.trim()).filter(p=>p)
-              if(parts.length<11)continue
+              // Strip known column headers from start
+              while(parts.length>0&&HEADERS.has(parts[0])) parts.shift()
 
-              // Count rows by item codes at end (alternating with texNames)
-              let icCount=0
-              let i=parts.length-1
-              while(i>=1){
-                if(/^0{3}\d{3,4}$/.test(parts[i])){
-                  icCount++; i-=2
-                } else break
-              }
-              if(!icCount)continue
-              const n=icCount
-              if(parts.length<11*n)continue
+              // Skip any leading non-data parts until we hit a 000XXX item code
+              while(parts.length>0&&!/^0{3}\d{3,4}$/.test(parts[0])) parts.shift()
 
-              // Normalize: take last 11n parts
-              const P=parts.slice(-11*n)
+              if(parts.length<11) continue
 
-              const onVals =P.slice(0,n)
-              const dueVals=Array.from({length:n},(_,i)=>P[2*n+2*i])
-              const ordVals=Array.from({length:n},(_,i)=>P[2*n+2*i+1])
+              // Each row = 11 consecutive parts:
+              // [0]=itemCode  [1]=texName  [2]=patCode  [3]=patName  [4]=colorCode
+              // [5]=color     [6]=qty      [7]=orderDate [8]=dueDate  [9]=store  [10]=orderNum
+              // Multi-row groups: row 2 starts at [11], row 3 at [22], etc.
 
-              // Qty block [4n..5n-1]
-              const qtyNums:number[]=[]
-              for(const qp of P.slice(4*n,5*n)){
-                const ms=qp.match(/\b\d+[\.,]\d{2}\b/g)||[]
-                for(const m of ms)qtyNums.push(parseFloat(m.replace(",",".")))
-              }
-              if(qtyNums.length>n&&Math.abs(qtyNums[qtyNums.length-1]-qtyNums.slice(0,-1).reduce((a,b)=>a+b,0))<0.01)
-                qtyNums.pop()
-
-              const ccVals=P.slice(6*n,7*n)
-              const pcVals=P.slice(8*n,9*n)
-              const icVals=Array.from({length:n},(_,i)=>P[9*n+2*i+1])
+              let n=0
+              while(n*11<parts.length&&/^0{3}\d{3,4}$/.test(parts[n*11])) n++
+              if(n===0) continue
 
               for(let i=0;i<n;i++){
-                const ic=icVals[i]||""
-                if(!/^0{3}\d{3,4}$/.test(ic))continue
-                const on =pk2(onVals,i)
-                if(!on||!/^\d{6}$/.test(on))continue
-                const cc=(pk2(ccVals,i).replace(/\D/g,"")||"01").padStart(2,"0")
-                const pc=(pk2(pcVals,i).replace(/\D/g,"")||"01").padStart(2,"0")
-                const qty=qtyNums.length>i?Math.ceil(qtyNums[i]):0
-                if(qty===0)continue
-                let ordered=(pk2(ordVals,i)||"").replace(/\//g,"-")
-                let due    =(pk2(dueVals,i)||"").replace(/\//g,"-")
-                if(!/^\d{4}-\d{2}-\d{2}$/.test(ordered))ordered=due
-                if(!/^\d{4}-\d{2}-\d{2}$/.test(due))due=ordered
+                const base=i*11
+                if(base+10>=parts.length) continue
+
+                const ic=parts[base+0]
+                if(!/^0{3}\d{3,4}$/.test(ic)) continue
+
+                const pc=(parts[base+2].replace(/\D/g,"")||"01").padStart(2,"0")  // patternCode
+                const cc=(parts[base+4].replace(/\D/g,"")||"01").padStart(2,"0")  // colorCode
+                const on=parts[base+10]
+                if(!/^\d{6}$/.test(on)) continue
+
+                // Qty: "100.00   100.00" → take first number
+                const qtyNums=(parts[base+6].match(/\b\d+\.\d+\b/g)||[]).map(Number)
+                if(!qtyNums.length) continue
+                const qty=Math.ceil(qtyNums[0])
+                if(qty===0) continue
+
+                let ordered=parts[base+7].replace(/\//g,"-")
+                let due    =parts[base+8].replace(/\//g,"-")
+                if(!/^\d{4}-\d{2}-\d{2}$/.test(ordered)) ordered=due
+                if(!/^\d{4}-\d{2}-\d{2}$/.test(due))     due=ordered
 
                 const appCode=`${parseInt(ic,10)}/${pc}/${cc}`
-                if(!/^\d+\/\d{2}\/\d{2}$/.test(appCode))continue
+                if(!/^\d+\/\d{2}\/\d{2}$/.test(appCode)) continue
 
                 const dk=`${appCode}||${ordered}||${qty}||${on.trim()}`
                 const tex=texMap[appCode]||null
                 const status:ImportRow["status"]=!tex?"no-textile":exKeys.has(dk)?"duplicate":"new"
+
                 rows.push({appCode,textileName:tex?tex.name:"",color:"",qty,store:"",ordered,due,orderNum:on,status,tex})
               }
             }
