@@ -3533,69 +3533,56 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             const ab=await file.arrayBuffer()
             const pdf=await pdfjs.getDocument({data:ab}).promise
 
-            // Extract all items from ALL pages with positions
+            // Collect all text items sorted by Y position (top→bottom) then X (right→left RTL)
             type TItem={str:string;x:number;y:number;page:number}
             const allItems:TItem[]=[]
-
             for(let p=1;p<=pdf.numPages;p++){
               const page=await pdf.getPage(p)
               const vp=page.getViewport({scale:1})
               const tc=await page.getTextContent({normalizeWhitespace:false})
               for(const it of tc.items){
-                const s=it.str  // keep spaces, don't trim yet
-                if(!s.trim()) continue
+                if(!it.str.trim()) continue
                 allItems.push({
-                  str:s,
+                  str:it.str,
                   x:Math.round(it.transform[4]),
-                  y:Math.round(vp.height - it.transform[5]),
+                  y:Math.round(vp.height-it.transform[5]),
                   page:p,
                 })
               }
             }
 
-            // Sort: page → Y → X descending (RTL)
+            // Sort: page → Y → X desc (RTL)
             allItems.sort((a,b)=>{
               if(a.page!==b.page) return a.page-b.page
               if(a.y!==b.y) return a.y-b.y
               return b.x-a.x
             })
 
-            // Group into text boxes: same page + same Y = same box
+            // Group items at same Y into text boxes (joined without separator)
+            // Same as what pdfminer does for each text box
             type Box={y:number;page:number;str:string}
             const boxes:Box[]=[]
             for(const item of allItems){
               const last=boxes[boxes.length-1]
-              if(last && last.page===item.page && Math.abs(last.y-item.y)<=2){
-                last.str += item.str
+              if(last&&last.page===item.page&&Math.abs(last.y-item.y)<=2){
+                last.str+=item.str
               } else {
-                boxes.push({y:item.y, page:item.page, str:item.str})
+                boxes.push({y:item.y,page:item.page,str:item.str})
               }
             }
 
-            // Build \n\n separated text
-            const fullText=boxes.map(b=>b.str.trim()).filter(t=>t).join("\n\n")
+            // Build flat text — all boxes concatenated (no separator)
+            const flat=boxes.map(b=>b.str.trim()).filter(t=>t).join("")
 
-            // Check if SEP exists
+            // Remove column headers and group separators
             const SEP="زوـــجحملا فنــــــصلا ىلاـــــــــــمجإ"
-            if(!fullText.includes(SEP)){
-              // Log first 2000 chars for debugging
-              console.log("FULL TEXT SAMPLE:", fullText.slice(0,2000))
-              console.log("SEP NOT FOUND. Looking for partial match...")
-              // Try partial
-              const partial="ىلاـــــ"
-              console.log("Partial found:", fullText.includes(partial))
-              // Log all unique chars around a known Arabic string
-              const idx=fullText.indexOf("000701")
-              if(idx>0) console.log("Context around 000701:", JSON.stringify(fullText.slice(idx-200,idx+100)))
-              throw new Error("PDF separator not found. Check browser console (F12) for debug info.")
-            }
+            const HEADER="فنصلا .ك فــنصلاهمسر .ك ةمسرلانوللا .ك نوــللازجحلا .ت ةيمكلاميلستلا .تعرــــفلازجحلا نذا"
+            let cleaned=flat.replace(new RegExp(SEP.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'),'|SEP|')
+                            .replace(new RegExp(HEADER.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'),'|HDR|')
+            // Remove page headers (ةحفصلا مقر N نم ... up to first 000XXX)
+            cleaned=cleaned.replace(/ةحفصلا مقر[\s\S]*?(?=0{3}\d{3,4})/g,'')
 
-            const groups=fullText.split(SEP)
-
-            const HEADERS=new Set([
-              "فنصلا .ك","فــنصلا","همسر .ك","ةمسرلا","نوللا .ك","نوــللا",
-              "زجحلا .ت ةيمكلا","ميلستلا .ت","عرــــفلا","زجحلا نذا"
-            ])
+            const segments=cleaned.split('|SEP|')
 
             const texMap:Record<string,Textile>={}
             for(const t of textiles) texMap[t.code]=t
@@ -3603,48 +3590,64 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               orders.map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`)
             )
 
+            const seen=new Set<string>()
             const rows:ImportRow[]=[]
 
-            for(const g of groups){
-              let parts=g.split("\n\n").map(p=>p.trim()).filter(p=>p)
-              while(parts.length>0 && HEADERS.has(parts[0])) parts.shift()
-              while(parts.length>0 && !/^0{3}\d{3,4}$/.test(parts[0])) parts.shift()
-              if(parts.length<11) continue
+            for(const seg of segments){
+              const s=seg.replace(/\|HDR\|/g,'')
 
-              let n=0
-              while(n*11<parts.length && /^0{3}\d{3,4}$/.test(parts[n*11])) n++
-              if(n===0) continue
+              // Find ALL 000XXX positions — every one is a row start
+              const icMatches=[...s.matchAll(/0{3}\d{3,4}/g)]
+              if(!icMatches.length) continue
 
-              for(let i=0;i<n;i++){
-                const base=i*11
-                if(base+10>=parts.length) continue
-                const ic=parts[base+0]
-                if(!/^0{3}\d{3,4}$/.test(ic)) continue
-                const pc=(parts[base+2].replace(/\D/g,"")||"01").padStart(2,"0")
-                const cc=(parts[base+4].replace(/\D/g,"")||"01").padStart(2,"0")
-                const on=parts[base+10]
-                if(!/^\d{6}$/.test(on)) continue
-                const qtyNums=(parts[base+6].match(/\b\d+\.\d+\b/g)||[]).map(Number)
+              for(let j=0;j<icMatches.length;j++){
+                const icMatch=icMatches[j]
+                const ic=icMatch[0]
+                const rowStart=icMatch.index!
+                const rowEnd=j+1<icMatches.length?icMatches[j+1].index!:s.length
+                const row=s.slice(rowStart,rowEnd)
+
+                // Need 2 dates
+                const dates=row.match(/\d{4}\/\d{2}\/\d{2}/g)||[]
+                if(dates.length<2) continue
+                const ordered=(dates[0]||"").replace(/\//g,'-')
+                const due    =(dates[1]||"").replace(/\//g,'-')
+
+                // 2-digit codes before first date
+                const firstDatePos=row.indexOf(dates[0]||"")
+                const beforeDates=row.slice(ic.length,firstDatePos)
+                const codes=(beforeDates.match(/(?<!\d)(\d{2})(?!\d)/g)||[])
+                if(codes.length<2) continue
+                const pc=(codes[0]||"01").padStart(2,'0')
+                const cc=(codes[1]||"01").padStart(2,'0')
+
+                // Qty: first decimal number before first date
+                const qtyNums=(row.slice(0,firstDatePos).match(/\b\d+\.\d+\b/g)||[]).map(Number)
                 if(!qtyNums.length) continue
                 const qty=Math.ceil(qtyNums[0])
                 if(qty===0) continue
-                let ordered=parts[base+7].replace(/\//g,"-")
-                let due    =parts[base+8].replace(/\//g,"-")
-                if(!/^\d{4}-\d{2}-\d{2}$/.test(ordered)) ordered=due
-                if(!/^\d{4}-\d{2}-\d{2}$/.test(due))     due=ordered
+
+                // Order number: after due date, last 6-digit standalone number
+                const afterDue=row.slice(row.lastIndexOf(dates[1])+dates[1].length)
+                const onCandidates=(afterDue.match(/(?<!\d)(\d{6})(?!\d)/g)||[])
+                let on=onCandidates.length?onCandidates[onCandidates.length-1]:null
+                if(!on){
+                  const longNums=afterDue.match(/\d{6,}/g)||[]
+                  if(longNums.length) on=longNums[longNums.length-1].slice(-6)
+                }
+                if(!on) continue
+
                 const appCode=`${parseInt(ic,10)}/${pc}/${cc}`
                 if(!/^\d+\/\d{2}\/\d{2}$/.test(appCode)) continue
+
                 const dk=`${appCode}||${ordered}||${qty}||${on.trim()}`
+                if(seen.has(dk)) continue
+                seen.add(dk)
+
                 const tex=texMap[appCode]||null
                 const status:ImportRow["status"]=!tex?"no-textile":exKeys.has(dk)?"duplicate":"new"
                 rows.push({appCode,textileName:tex?tex.name:"",color:"",qty,store:"",ordered,due,orderNum:on,status,tex})
               }
-            }
-
-            if(rows.length===0){
-              console.log("Groups found:", groups.length)
-              console.log("Sample group 1:", groups[1]?.slice(0,500))
-              throw new Error(`Found ${groups.length} groups but parsed 0 orders. Check browser console (F12).`)
             }
             return rows
           }
