@@ -3587,7 +3587,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             const texMap:Record<string,Textile>={}
             for(const t of textiles) texMap[t.code]=t
             const exKeys=new Set(
-              orders.map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`)
+              orders.map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}`)
             )
 
             const seen=new Set<string>()
@@ -3640,7 +3640,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                 const appCode=`${parseInt(ic,10)}/${pc}/${cc}`
                 if(!/^\d+\/\d{2}\/\d{2}$/.test(appCode)) continue
 
-                const dk=`${appCode}||${ordered}||${qty}||${on.trim()}`
+                const dk=`${appCode}||${ordered}||${qty}`
                 if(seen.has(dk)) continue
                 seen.add(dk)
 
@@ -3703,9 +3703,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           const newCount=importRows.filter(r=>r.status==="new").length
           const dupCount=importRows.filter(r=>r.status==="duplicate").length
           const noTexCount=importRows.filter(r=>r.status==="no-textile").length
-          const pdfKeys=new Set(importRows.map(r=>`${r.appCode}||${r.ordered}||${r.qty}||${r.orderNum.trim()}`))
+          const pdfKeys=new Set(importRows.map(r=>`${r.appCode}||${r.ordered}||${r.qty}`))
           const possiblyDone=(importStatus==="preview"||importStatus==="done")
-            ?orders.filter(o=>o.warpStatus!=="done"&&!pdfKeys.has(`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`))
+            ?orders.filter(o=>o.warpStatus!=="done"&&!pdfKeys.has(`${o.textileCode}||${o.orderDate||""}||${o.quantity}`))
             :[]
 
           return (
