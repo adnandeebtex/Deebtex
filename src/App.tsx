@@ -3579,8 +3579,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             const HEADER="فنصلا .ك فــنصلاهمسر .ك ةمسرلانوللا .ك نوــللازجحلا .ت ةيمكلاميلستلا .تعرــــفلازجحلا نذا"
             let cleaned=flat.replace(new RegExp(SEP.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'),'|SEP|')
                             .replace(new RegExp(HEADER.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'),'|HDR|')
-            // Remove page headers (ةحفصلا مقر N نم ... up to first 000XXX)
+            // Remove page headers — strip everything from ةحفصلا مقر up to first 000XXX
             cleaned=cleaned.replace(/ةحفصلا مقر[\s\S]*?(?=0{3}\d{3,4})/g,'')
+            // Also remove the report date range header (من تاريخ ... الى تاريخ)
+            cleaned=cleaned.replace(/خيرات نم[\s\S]*?خيرات ىلا[\s\S]*?(?=0{3}\d{3,4}|\|SEP\||\|HDR\|)/g,'')
 
             const segments=cleaned.split('|SEP|')
 
@@ -3607,14 +3609,15 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                 const rowEnd=j+1<icMatches.length?icMatches[j+1].index!:s.length
                 const row=s.slice(rowStart,rowEnd)
 
-                // Need 2 dates
-                const dates=row.match(/\d{4}\/\d{2}\/\d{2}/g)||[]
-                if(dates.length<2) continue
-                const ordered=(dates[0]||"").replace(/\//g,'-')
-                const due    =(dates[1]||"").replace(/\//g,'-')
+                // Need 2 VALID order dates (not the report range dates 2023/08/06 or 2026/08/06 header)
+                const HEADER_DATES=new Set(["2026/08/06","2023/08/06","2026/08/06"])
+                const validDates=(row.match(/\d{4}\/\d{2}\/\d{2}/g)||[]).filter(d=>!HEADER_DATES.has(d))
+                if(validDates.length<2) continue
+                const ordered=(validDates[0]||"").replace(/\//g,'-')
+                const due    =(validDates[1]||"").replace(/\//g,'-')
 
                 // 2-digit codes before first date
-                const firstDatePos=row.indexOf(dates[0]||"")
+                const firstDatePos=row.indexOf(validDates[0]||"")
                 const beforeDates=row.slice(ic.length,firstDatePos)
                 const codes=(beforeDates.match(/(?<!\d)(\d{2})(?!\d)/g)||[])
                 if(codes.length<2) continue
@@ -3628,7 +3631,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                 if(qty===0) continue
 
                 // Order number: after due date, last 6-digit standalone number
-                const afterDue=row.slice(row.lastIndexOf(dates[1])+dates[1].length)
+                const afterDue=row.slice(row.lastIndexOf(validDates[1])+validDates[1].length)
                 const onCandidates=(afterDue.match(/(?<!\d)(\d{6})(?!\d)/g)||[])
                 let on=onCandidates.length?onCandidates[onCandidates.length-1]:null
                 if(!on){
@@ -3644,11 +3647,21 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                 if(seen.has(dk)) continue
                 seen.add(dk)
 
+                // Debug log suspicious rows
+                if(qty>100||ordered==="2023-08-06"){
+                  console.log("SUSPICIOUS ROW:",JSON.stringify({appCode,qty,ordered,row:row.slice(0,120)}))
+                }
+
                 const tex=texMap[appCode]||null
                 const status:ImportRow["status"]=!tex?"no-textile":exKeys.has(dk)?"duplicate":"new"
                 rows.push({appCode,textileName:tex?tex.name:"",color:"",qty,store:"",ordered,due,orderNum:on,status,tex})
               }
             }
+            if(rows.length===0){
+              throw new Error("No orders found. Check browser console (F12) for details.")
+            }
+            // Debug: log first 5 rows to console so we can verify
+            console.log("PDF Parser - first 10 rows:", rows.slice(0,10).map(r=>({appCode:r.appCode,qty:r.qty,ordered:r.ordered,orderNum:r.orderNum})))
             return rows
           }
 
