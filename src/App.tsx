@@ -245,7 +245,7 @@ type MachineCategory =
   | "Mechanical Double 280" | "Mechanical Double 140"
 type Priority   = "High" | "Normal" | "Low"
 type WarpStatus = "not-started" | "on-machine" | "done"
-type View = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history" | "suggestions" | "threads" | "textile-stock"
+type View = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history" | "suggestions" | "threads" | "textile-stock" | "import"
 
 // warpOrder: per-machine ordered list of warpKeys — controls which warp group runs first
 // key = machineId, value = array of warpKeys in display order
@@ -1297,6 +1297,17 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(new Set())
   const [warpGroupSearch, setWarpGroupSearch] = useState("")
   const [confirmDeleteOrder, setConfirmDeleteOrder] = useState<Order|null>(null)
+
+  type ImportRow = {
+    appCode:string; textileName:string; qty:number
+    ordered:string; due:string; orderNum:string; store:string
+    status:"new"|"duplicate"|"no-textile"; tex:Textile|null
+  }
+  const [importRows,     setImportRows]     = useState<ImportRow[]>([])
+  const [importSelected, setImportSelected] = useState<Set<number>>(new Set())
+  const [importStatus,   setImportStatus]   = useState<"idle"|"parsing"|"preview"|"importing"|"done">("idle")
+  const [importLog,      setImportLog]      = useState<string[]>([])
+  const [importProgress, setImportProgress] = useState(0)
   // tracks which warp blocks are expanded in the schedule — key = machineId+warpKey+blockIndex
   const [expandedBlocks, setExpandedBlocks] = useState<Set<string>>(new Set())
 
@@ -2199,6 +2210,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     {id:"analytics",     icon:"↗", label:"Analytics"},
     {id:"history",       icon:"🕓", label:"History"},
     {id:"suggestions",   icon:"💡", label:"Suggestions"},
+    {id:"import",        icon:"📥", label:"Import"},
   ]
 
   // ── LOADING GATE ──────────────────────────────────────────
@@ -3485,6 +3497,290 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                   </div>
                 </div>
               ))}
+            </div>
+          )
+        })()}
+
+        {/* ── IMPORT VIEW ───────────────────────────────── */}
+        {view==="import" && (()=>{
+          // Column indices (from row 6 header in XLS):
+          // 0=orderNum, 5=due, 7=ordered, 9=qty, 13=colorCode, 17=patCode, 18=texName, 24=itemCode
+
+          async function parseXLS(file:File):Promise<ImportRow[]> {
+            // Load SheetJS from CDN
+            if(!(window as unknown as Record<string,unknown>).XLSX){
+              await new Promise<void>((res,rej)=>{
+                const s=document.createElement("script")
+                s.src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"
+                s.onload=()=>res(); s.onerror=()=>rej(new Error("Failed to load SheetJS"))
+                document.head.appendChild(s)
+              })
+            }
+            const XLSX=(window as unknown as Record<string,unknown>).XLSX as {
+              read:(data:ArrayBuffer,opts:{type:string;cellDates:boolean})=>{
+                SheetNames:string[]
+                Sheets:Record<string,unknown>
+              }
+              utils:{
+                sheet_to_json:<T>(ws:unknown,opts:{header:number;raw:boolean;dateNF:string})=>T[]
+              }
+            }
+            const ab = await file.arrayBuffer()
+            const wb = XLSX.read(ab, {type:"array", cellDates:true})
+            const ws = wb.Sheets[wb.SheetNames[0]]
+            const rawRows = XLSX.utils.sheet_to_json<Record<string,unknown>>(ws, {header:1, raw:false, dateNF:"yyyy-mm-dd"})
+            const raw = rawRows as unknown as unknown[][]
+
+            const texMap:Record<string,Textile>={}
+            for(const t of textiles) texMap[t.code]=t
+
+            const exKeys=new Set(
+              orders.map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`)
+            )
+
+            function fmtDate(v:unknown):string {
+              if(!v) return ""
+              const s=String(v).trim()
+              // Already YYYY-MM-DD
+              if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+              // DD/MM/YYYY or MM/DD/YYYY
+              const parts=s.split(/[\/\-]/)
+              if(parts.length===3&&parts[0].length===4) return s
+              return s
+            }
+
+            const rows:ImportRow[]=[]
+            const seen=new Set<string>()
+
+            for(const row of raw){
+              const on   = String(row[0]||"").trim()
+              const ic   = String(row[24]||"").trim()
+
+              // Data row: col 0 = 6-digit orderNum, col 24 = 000XXX itemCode
+              if(!/^\d{6}$/.test(on)) continue
+              if(!/^0{3}\d{3,4}$/.test(ic)) continue
+
+              const due     = fmtDate(row[5])
+              const ordered = fmtDate(row[7])
+              const qtyRaw  = parseFloat(String(row[9]||"0").replace(/[^\d.]/g,""))
+              if(!qtyRaw||qtyRaw<=0) continue
+              const qty     = Math.ceil(qtyRaw)
+
+              const pc = String(row[17]||"01").trim().padStart(2,"0")
+              const cc = String(row[13]||"01").trim().padStart(2,"0")
+              const appCode = `${parseInt(ic,10)}/${pc}/${cc}`
+
+              const dk = `${appCode}||${ordered}||${qty}||${on}`
+              if(seen.has(dk)) continue
+              seen.add(dk)
+
+              const tex = texMap[appCode]||null
+              const matchKey = `${appCode}||${ordered}||${qty}||${on}`
+              const status:ImportRow["status"] = !tex?"no-textile":exKeys.has(matchKey)?"duplicate":"new"
+
+              rows.push({
+                appCode, textileName:tex?tex.name:String(row[18]||"").trim(),
+                qty, ordered, due, orderNum:on,
+                store:String(row[2]||"").trim(), status, tex
+              })
+            }
+            return rows
+          }
+
+          async function handleFile(e:React.ChangeEvent<HTMLInputElement>){
+            const file=e.target.files?.[0]; if(!file)return
+            setImportStatus("parsing"); setImportLog([`Reading ${file.name}...`])
+            try{
+              const rows=await parseXLS(file)
+              if(!rows.length) throw new Error("No orders found. Check this is the correct file.")
+              setImportRows(rows)
+              setImportSelected(new Set(rows.map((_,i)=>i).filter(i=>rows[i].status==="new")))
+              setImportStatus("preview")
+              const nN=rows.filter(r=>r.status==="new").length
+              const nD=rows.filter(r=>r.status==="duplicate").length
+              const nNo=rows.filter(r=>r.status==="no-textile").length
+              setImportLog([`✓ Found ${rows.length} orders — ${nN} new, ${nD} duplicates, ${nNo} no textile`])
+            }catch(err){
+              setImportStatus("idle")
+              setImportLog([`❌ Error: ${String(err)}`])
+            }
+            e.target.value=""
+          }
+
+          async function doImport(){
+            const sel=[...importSelected].map(i=>importRows[i]).filter(r=>r.status==="new"&&r.tex)
+            if(!sel.length)return
+            setImportStatus("importing")
+            const log:string[]=[]
+            for(let i=0;i<sel.length;i++){
+              const r=sel[i]; const t=r.tex!
+              const newOrder:Order={
+                id:Date.now()+i, textileCode:r.appCode, textileName:t.name,
+                color:"", fabricType:t.fabricType, quantity:r.qty,
+                deadline:r.due, orderDate:r.ordered, priority:"Normal",
+                machineCategories:t.machineCategories, warpStatus:"not-started",
+                notes:"", orderNumber:r.orderNum, store:r.store, warpClosed:false,
+              }
+              setOrders(p=>[...p,newOrder])
+              await dbUpsert("orders",newOrder as unknown as Record<string,unknown>)
+              log.push(`✓ ${r.appCode} · ${t.name} · ${r.qty}m`)
+              setImportProgress(Math.round((i+1)/sel.length*100))
+              setImportLog([...log])
+            }
+            setImportStatus("done")
+            setImportLog([...log,"",`✅ Done: ${sel.length} orders imported`])
+          }
+
+          const nNew  = importRows.filter(r=>r.status==="new").length
+          const nDup  = importRows.filter(r=>r.status==="duplicate").length
+          const nNoTex= importRows.filter(r=>r.status==="no-textile").length
+          const pdfKeys=new Set(importRows.map(r=>`${r.appCode}||${r.ordered}||${r.qty}||${r.orderNum}`))
+          const possiblyDone=(importStatus==="preview"||importStatus==="done")
+            ?orders.filter(o=>o.warpStatus!=="done"&&!pdfKeys.has(`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`))
+            :[]
+
+          return (
+            <div style={S.viewPad} className="dtx-viewpad">
+              <div style={S.card}>
+                <div style={S.cHead} className="dtx-chead">
+                  <span style={S.cTitle}>📥 Import orders from Excel</span>
+                  <span style={S.cSub}>عرض حجوزات الفروع للتصنيع (.xls / .xlsx)</span>
+                  {importStatus!=="idle"&&<button style={{...S.btnSm,marginLeft:"auto"}} onClick={()=>{setImportStatus("idle");setImportRows([]);setImportLog([]);setImportProgress(0)}}>← Start over</button>}
+                </div>
+                <div style={S.cBody}>
+
+                  {importStatus==="idle"&&(
+                    <div>
+                      <div style={{border:"2px dashed #c4c0f0",borderRadius:12,padding:40,textAlign:"center",cursor:"pointer",marginBottom:16}}
+                        onClick={()=>document.getElementById("xls-inp")?.click()}>
+                        <div style={{fontSize:40,marginBottom:12}}>📊</div>
+                        <div style={{fontSize:14,color:"#555",marginBottom:4}}>Click to upload your Excel file</div>
+                        <div style={{fontSize:12,color:"#aaa"}}>.xls or .xlsx · عرض حجوزات الفروع للتصنيع</div>
+                      </div>
+                      <input id="xls-inp" type="file" accept=".xls,.xlsx" style={{display:"none"}} onChange={handleFile}/>
+                      {importLog.length>0&&<div style={{background:"#FEEBEB",borderRadius:8,padding:"12px 14px",fontSize:12,color:"#A32D2D",marginBottom:12}}>{importLog.map((l,i)=><div key={i}>{l}</div>)}</div>}
+                      <div style={{fontSize:12,color:"#888",padding:"10px 14px",background:"#f9f9f9",borderRadius:8,lineHeight:1.8}}>
+                        <strong>Duplicate check:</strong> textile code + order date + quantity + order number
+                      </div>
+                    </div>
+                  )}
+
+                  {importStatus==="parsing"&&(
+                    <div style={{textAlign:"center",padding:40}}>
+                      <div style={{fontSize:32,marginBottom:12}}>⏳</div>
+                      <div style={{fontSize:14,color:"#555"}}>Reading Excel file...</div>
+                    </div>
+                  )}
+
+                  {(importStatus==="preview"||importStatus==="importing"||importStatus==="done")&&(
+                    <div>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}} className="dtx-metrics">
+                        {[{l:"New",v:nNew,c:"#166534",b:"#EDFBEE"},{l:"Duplicates",v:nDup,c:"#aaa",b:"#f5f5f5"},
+                          {l:"No textile",v:nNoTex,c:"#92400E",b:"#FEF3C7"},{l:"Check if done",v:possiblyDone.length,c:"#A32D2D",b:"#FEEBEB"}
+                        ].map(({l,v,c,b})=>(
+                          <div key={l} style={{background:b,borderRadius:8,padding:"10px 14px"}}>
+                            <div style={{fontSize:11,color:c,marginBottom:2}}>{l}</div>
+                            <div style={{fontSize:22,fontWeight:700,color:c}}>{v}</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {importLog.length>0&&(
+                        <div style={{background:"#f5f5f5",borderRadius:8,padding:"10px 14px",marginBottom:12,fontFamily:"monospace",fontSize:12,maxHeight:120,overflowY:"auto"}}>
+                          {importLog.map((l,i)=><div key={i} style={{color:l.startsWith("✓")||l.startsWith("✅")?"#166534":"#555"}}>{l}</div>)}
+                        </div>
+                      )}
+
+                      {importStatus==="importing"&&(
+                        <div style={{height:6,background:"#e5e5e5",borderRadius:3,marginBottom:12,overflow:"hidden"}}>
+                          <div style={{height:"100%",background:"#7F77DD",borderRadius:3,width:`${importProgress}%`,transition:"width 0.2s"}}/>
+                        </div>
+                      )}
+
+                      <div style={{maxHeight:340,overflowY:"auto",border:"0.5px solid #e5e5e5",borderRadius:8,marginBottom:12}}>
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,tableLayout:"fixed"}}>
+                          <thead>
+                            <tr style={{background:"#f5f5f5",position:"sticky" as const,top:0}}>
+                              <th style={{padding:"7px 8px",width:28}}>
+                                <input type="checkbox" onChange={e=>{
+                                  if(e.target.checked)setImportSelected(new Set(importRows.map((_,i)=>i).filter(i=>importRows[i].status==="new")))
+                                  else setImportSelected(new Set())
+                                }}/>
+                              </th>
+                              {["Status","Code","Name","Qty","Order date","Due","Store","Order no."].map(h=>(
+                                <th key={h} style={{padding:"7px 8px",textAlign:"right",color:"#555",fontWeight:500,fontSize:11}}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {importRows.map((r,i)=>(
+                              <tr key={i} style={{background:r.status==="duplicate"?"#fafafa":r.status==="no-textile"?"#FFFBEB":"transparent",borderBottom:"0.5px solid #f5f5f5"}}>
+                                <td style={{padding:"6px 8px"}}>
+                                  <input type="checkbox" checked={importSelected.has(i)} disabled={r.status!=="new"}
+                                    onChange={e=>{const s=new Set(importSelected);e.target.checked?s.add(i):s.delete(i);setImportSelected(s)}}/>
+                                </td>
+                                <td style={{padding:"6px 8px"}}>
+                                  <span style={{background:r.status==="new"?"#EDFBEE":r.status==="duplicate"?"#f5f5f5":"#FEF3C7",
+                                    color:r.status==="new"?"#166534":r.status==="duplicate"?"#aaa":"#92400E",
+                                    borderRadius:20,padding:"2px 7px",fontSize:11,fontWeight:500}}>
+                                    {r.status==="no-textile"?"no textile":r.status}
+                                  </span>
+                                </td>
+                                <td style={{padding:"6px 8px",fontWeight:600,fontSize:11}}>{r.appCode}</td>
+                                <td style={{padding:"6px 8px",color:"#555"}} dir="auto">{r.textileName}</td>
+                                <td style={{padding:"6px 8px",fontWeight:600,color:"#534AB7"}}>{r.qty}m</td>
+                                <td style={{padding:"6px 8px",color:"#aaa",fontSize:11}}>{r.ordered}</td>
+                                <td style={{padding:"6px 8px",color:"#aaa",fontSize:11}}>{r.due}</td>
+                                <td style={{padding:"6px 8px",fontSize:11}} dir="auto">{r.store}</td>
+                                <td style={{padding:"6px 8px",fontSize:10,color:"#bbb"}}>{r.orderNum}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {possiblyDone.length>0&&(
+                        <div style={{background:"#FEEBEB",borderRadius:8,padding:"12px 14px",marginBottom:12}}>
+                          <div style={{fontWeight:600,color:"#A32D2D",marginBottom:6,fontSize:13}}>🔴 Check if done — {possiblyDone.length} active orders not in this file</div>
+                          <div style={{fontSize:12,color:"#A32D2D",marginBottom:6}}>Active in your app but missing from this Excel. Check if completed and mark done.</div>
+                          {possiblyDone.slice(0,15).map(o=>(
+                            <div key={o.id} style={{fontSize:11,padding:"2px 0",fontFamily:"monospace"}} dir="auto">
+                              {o.textileCode} · {o.textileName||""} · {o.quantity}m · ordered {o.orderDate||"—"}
+                            </div>
+                          ))}
+                          {possiblyDone.length>15&&<div style={{fontSize:11,color:"#aaa",marginTop:4}}>...and {possiblyDone.length-15} more</div>}
+                        </div>
+                      )}
+
+                      {nNoTex>0&&(
+                        <div style={{background:"#FEF3C7",borderRadius:8,padding:"12px 14px",marginBottom:12}}>
+                          <div style={{fontWeight:600,color:"#92400E",marginBottom:6,fontSize:13}}>⚠️ {nNoTex} orders skipped — add these textiles first</div>
+                          {importRows.filter(r=>r.status==="no-textile").map((r,i)=>(
+                            <div key={i} style={{fontSize:11,color:"#92400E",fontFamily:"monospace"}}>Code: {r.appCode} · {r.qty}m</div>
+                          ))}
+                        </div>
+                      )}
+
+                      {importStatus==="preview"&&(
+                        <div style={{display:"flex",gap:8}}>
+                          <button style={{...S.btnPrimary,opacity:importSelected.size===0?0.5:1}} onClick={doImport} disabled={importSelected.size===0}>
+                            ✓ Import {importSelected.size} selected orders
+                          </button>
+                          <input id="xls-inp2" type="file" accept=".xls,.xlsx" style={{display:"none"}} onChange={handleFile}/>
+                          <button style={S.btnSm} onClick={()=>document.getElementById("xls-inp2")?.click()}>Upload different file</button>
+                        </div>
+                      )}
+                      {importStatus==="done"&&(
+                        <div>
+                          <input id="xls-inp3" type="file" accept=".xls,.xlsx" style={{display:"none"}} onChange={handleFile}/>
+                          <button style={{...S.btnSm,background:"#EDFBEE",color:"#166534",border:"0.5px solid #86EFAC"}}
+                            onClick={()=>document.getElementById("xls-inp3")?.click()}>📊 Import another file</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           )
         })()}
