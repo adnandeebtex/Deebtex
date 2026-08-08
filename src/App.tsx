@@ -3535,7 +3535,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             for(const t of textiles) texMap[t.code]=t
 
             const exKeys=new Set(
-              orders.map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`)
+              orders.map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}`)
             )
 
             function fmtDate(v:unknown):string {
@@ -3556,9 +3556,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               const on   = String(row[0]||"").trim()
               const ic   = String(row[24]||"").trim()
 
-              // Data row: col 0 = 6-digit orderNum, col 24 = 000XXX itemCode
+              // Data row: col 0 = 6-digit orderNum, col 24 = 6-digit itemCode starting with 0
               if(!/^\d{6}$/.test(on)) continue
-              if(!/^0{3}\d{3,4}$/.test(ic)) continue
+              if(!/^0\d{5}$/.test(ic)) continue
 
               const due     = fmtDate(row[5])
               const ordered = fmtDate(row[7])
@@ -3570,13 +3570,12 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               const cc = String(row[13]||"01").trim().padStart(2,"0")
               const appCode = `${parseInt(ic,10)}/${pc}/${cc}`
 
-              const dk = `${appCode}||${ordered}||${qty}||${on}`
+              const dk = `${appCode}||${ordered}||${qty}`
               if(seen.has(dk)) continue
               seen.add(dk)
 
               const tex = texMap[appCode]||null
-              const matchKey = `${appCode}||${ordered}||${qty}||${on}`
-              const status:ImportRow["status"] = !tex?"no-textile":exKeys.has(matchKey)?"duplicate":"new"
+              const status:ImportRow["status"] = !tex?"no-textile":exKeys.has(dk)?"duplicate":"new"
 
               rows.push({
                 appCode, textileName:tex?tex.name:String(row[18]||"").trim(),
@@ -3634,9 +3633,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           const nNew  = importRows.filter(r=>r.status==="new").length
           const nDup  = importRows.filter(r=>r.status==="duplicate").length
           const nNoTex= importRows.filter(r=>r.status==="no-textile").length
-          const pdfKeys=new Set(importRows.map(r=>`${r.appCode}||${r.ordered}||${r.qty}||${r.orderNum}`))
+          const pdfKeys=new Set(importRows.map(r=>`${r.appCode}||${r.ordered}||${r.qty}`))
           const possiblyDone=(importStatus==="preview"||importStatus==="done")
-            ?orders.filter(o=>o.warpStatus!=="done"&&!pdfKeys.has(`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`))
+            ?orders.filter(o=>o.warpStatus!=="done"&&!pdfKeys.has(`${o.textileCode}||${o.orderDate||""}||${o.quantity}`))
             :[]
 
           return (
