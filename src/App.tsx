@@ -3543,14 +3543,28 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               const s=String(v).trim()
               // Already YYYY-MM-DD
               if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
-              // DD/MM/YYYY or MM/DD/YYYY
-              const parts=s.split(/[\/\-]/)
-              if(parts.length===3&&parts[0].length===4) return s
+              // YYYY/MM/DD
+              if(/^\d{4}\/\d{2}\/\d{2}$/.test(s)) return s.replace(/\//g,'-')
+              // M/D/YYYY or MM/DD/YYYY (US format SheetJS sometimes outputs)
+              const us=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+              if(us) return `${us[3]}-${us[1].padStart(2,'0')}-${us[2].padStart(2,'0')}`
+              // D/M/YYYY
+              const eu=s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/)
+              if(eu) return `${eu[3]}-${eu[2].padStart(2,'0')}-${eu[1].padStart(2,'0')}`
+              // JS Date object (when cellDates:true)
+              if(v instanceof Date){
+                const d=v as Date
+                const y=d.getFullYear()
+                const m=String(d.getMonth()+1).padStart(2,'0')
+                const day=String(d.getDate()).padStart(2,'0')
+                return `${y}-${m}-${day}`
+              }
               return s
             }
 
             const rows:ImportRow[]=[]
             const seen=new Set<string>()
+            let debugLogged=false
 
             for(const row of raw){
               const on   = String(row[0]||"").trim()
@@ -3571,6 +3585,11 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               const appCode = `${parseInt(ic,10)}/${pc}/${cc}`
 
               const dk = `${appCode}||${ordered}||${qty}`
+              if(!debugLogged){
+                console.log("First row raw dates:", {col5:row[5], col7:row[7], ordered, due, appCode, qty, dk})
+                console.log("Sample exKey:", [...exKeys].slice(0,3))
+                debugLogged=true
+              }
               if(seen.has(dk)) continue
               seen.add(dk)
 
