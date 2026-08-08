@@ -3634,7 +3634,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               const r=sel[i]; const t=r.tex!
               const newOrder:Order={
                 id:Date.now()+i, textileCode:r.appCode, textileName:t.name,
-                color:"", fabricType:t.fabricType, quantity:r.qty,
+                color:t.color, fabricType:t.fabricType, quantity:r.qty,
                 deadline:r.due, orderDate:r.ordered, priority:"Normal",
                 machineCategories:t.machineCategories, warpStatus:"not-started",
                 notes:"", orderNumber:r.orderNum, store:r.store, warpClosed:false,
