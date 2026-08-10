@@ -3759,14 +3759,40 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
                       {possiblyDone.length>0&&(
                         <div style={{background:"#FEEBEB",borderRadius:8,padding:"12px 14px",marginBottom:12}}>
-                          <div style={{fontWeight:600,color:"#A32D2D",marginBottom:6,fontSize:13}}>🔴 Check if done — {possiblyDone.length} active orders not in this file</div>
-                          <div style={{fontSize:12,color:"#A32D2D",marginBottom:6}}>Active in your app but missing from this Excel. Check if completed and mark done.</div>
-                          {possiblyDone.slice(0,15).map(o=>(
-                            <div key={o.id} style={{fontSize:11,padding:"2px 0",fontFamily:"monospace"}} dir="auto">
-                              {o.textileCode} · {o.textileName||""} · {o.quantity}m · ordered {o.orderDate||"—"}
-                            </div>
-                          ))}
-                          {possiblyDone.length>15&&<div style={{fontSize:11,color:"#aaa",marginTop:4}}>...and {possiblyDone.length-15} more</div>}
+                          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6,flexWrap:"wrap"}}>
+                            <span style={{fontWeight:600,color:"#A32D2D",fontSize:13}}>🔴 Check if done — {possiblyDone.length} active orders not in this file</span>
+                            <button
+                              style={{marginLeft:"auto",padding:"5px 12px",borderRadius:6,border:"0.5px solid #A32D2D",background:"#A32D2D",color:"#fff",fontSize:11,fontWeight:600,cursor:"pointer"}}
+                              onClick={async()=>{
+                                if(!window.confirm(`Mark all ${possiblyDone.length} orders as done? This cannot be undone.`)) return
+                                for(const o of possiblyDone){
+                                  const updated={...o,warpStatus:"done" as const,completedAt:new Date().toISOString()}
+                                  setOrders(p=>p.map(x=>x.id===o.id?updated:x))
+                                  await dbUpsert("orders",updated as unknown as Record<string,unknown>)
+                                }
+                              }}>
+                              ✓ Mark all {possiblyDone.length} as done
+                            </button>
+                          </div>
+                          <div style={{fontSize:12,color:"#A32D2D",marginBottom:8}}>These are active in your app but missing from this Excel. They were likely completed — mark them done to move them to History.</div>
+                          <div style={{maxHeight:300,overflowY:"auto",background:"rgba(0,0,0,0.03)",borderRadius:6,padding:"6px 8px"}}>
+                            {possiblyDone.map(o=>(
+                              <div key={o.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"3px 0",borderBottom:"0.5px solid rgba(163,45,45,0.1)"}}>
+                                <span style={{fontSize:11,fontFamily:"monospace"}} dir="auto">
+                                  {o.textileCode} · {o.textileName||""} · {o.quantity}m · ordered {o.orderDate||"—"}
+                                </span>
+                                <button
+                                  style={{flexShrink:0,marginLeft:8,padding:"2px 8px",borderRadius:4,border:"0.5px solid #A32D2D",background:"transparent",color:"#A32D2D",fontSize:10,cursor:"pointer"}}
+                                  onClick={async()=>{
+                                    const updated={...o,warpStatus:"done" as const,completedAt:new Date().toISOString()}
+                                    setOrders(p=>p.map(x=>x.id===o.id?updated:x))
+                                    await dbUpsert("orders",updated as unknown as Record<string,unknown>)
+                                  }}>
+                                  ✓ done
+                                </button>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       )}
 
