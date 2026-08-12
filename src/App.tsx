@@ -1298,6 +1298,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [warpGroupSearch, setWarpGroupSearch] = useState("")
   const [confirmDeleteOrder, setConfirmDeleteOrder] = useState<Order|null>(null)
   const [expandedBase, setExpandedBase] = useState<string|null>(null)
+  const [seasonPreset, setSeasonPreset] = useState<"all"|"month"|"3months"|"custom">("all")
+  const [seasonFrom,   setSeasonFrom]   = useState("")
+  const [seasonTo,     setSeasonTo]     = useState("")
+  const [overdueShowAll, setOverdueShowAll] = useState(false)
 
   type ImportRow = {
     appCode:string; textileName:string; qty:number
@@ -3183,54 +3187,277 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                   </div>
                 </div>
 
-                {/* ── SALES BY STORE ────────────────────────── */}
-                <div style={S.card}>
-                  <div style={S.cHead} className="dtx-chead">
-                    <span style={S.cTitle}>Sales by store</span>
-                    <span style={S.cSub}>orders & meters per branch</span>
-                  </div>
-                  <div style={S.cBody}>
-                    {(()=>{
-                      const storeData = STORES.map(s=>{
-                        const storeOrders = allOrders.filter(o=>o.store===s)
-                        const meters = storeOrders.reduce((sum,o)=>sum+o.quantity,0)
-                        const done   = storeOrders.filter(o=>o.warpStatus==="done").reduce((sum,o)=>sum+o.quantity,0)
-                        return {store:s, count:storeOrders.length, meters, done}
-                      }).filter(s=>s.count>0).sort((a,b)=>b.meters-a.meters)
-                      const noStore = allOrders.filter(o=>!o.store).length
-                      const maxM = Math.max(...storeData.map(s=>s.meters),1)
-                      if (storeData.length===0) return (
-                        <div style={S.empty}>No store data yet. Select a store when adding orders.</div>
-                      )
-                      return (
-                        <>
-                          {storeData.map((s,i)=>(
-                            <div key={s.store} style={{marginBottom:14}}>
-                              <div style={{display:"flex",justifyContent:"space-between",
-                                fontSize:13,marginBottom:4,alignItems:"center"}}>
-                                <span style={{fontWeight:i===0?600:400}} dir="auto">
-                                  {i===0?"🏆 ":""}{s.store}
-                                </span>
-                                <div style={{display:"flex",gap:10,fontSize:12,color:"#888"}}>
-                                  <span>{s.count} orders</span>
-                                  <span style={{color:"#534AB7",fontWeight:500}}>{s.meters.toLocaleString()}m</span>
-                                  {s.done>0&&<span style={{color:"#639922"}}>{s.done}m done</span>}
-                                </div>
+                {/* ── STORE ANALYTICS ───────────────────────── */}
+                {(()=>{
+                  const storeData = STORES.map(s=>{
+                    const ords   = allOrders.filter(o=>o.store===s)
+                    const meters = ords.reduce((sum,o)=>sum+o.quantity,0)
+                    const done   = ords.filter(o=>o.warpStatus==="done").length
+                    const high   = ords.filter(o=>o.priority==="High").length
+                    const overdue= ords.filter(o=>o.warpStatus!=="done"&&o.deadline&&new Date(o.deadline)<new Date()).length
+                    const avgSize= ords.length?Math.round(meters/ords.length):0
+                    return {store:s, count:ords.length, meters, done, high, overdue, avgSize}
+                  }).filter(s=>s.count>0).sort((a,b)=>b.meters-a.meters)
+                  const maxM=Math.max(...storeData.map(s=>s.meters),1)
+                  const noStore=allOrders.filter(o=>!o.store).length
+                  if(storeData.length===0) return (
+                    <div style={{...S.card,gridColumn:"1 / -1"}}>
+                      <div style={S.cHead} className="dtx-chead"><span style={S.cTitle}>🏪 Store analytics</span></div>
+                      <div style={S.cBody}><div style={S.empty}>No store data yet.</div></div>
+                    </div>
+                  )
+                  return (
+                    <div style={{...S.card,gridColumn:"1 / -1"}}>
+                      <div style={S.cHead} className="dtx-chead">
+                        <span style={S.cTitle}>🏪 Store analytics</span>
+                        <span style={S.cSub}>orders, meters, urgency per branch</span>
+                      </div>
+                      <div style={S.cBody}>
+                        {/* summary strip */}
+                        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:16}} className="dtx-metrics">
+                          <div style={{background:"#F3F2FD",borderRadius:8,padding:"10px 14px"}}>
+                            <div style={{fontSize:11,color:"#534AB7",marginBottom:2}}>Active branches</div>
+                            <div style={{fontSize:20,fontWeight:700,color:"#534AB7"}}>{storeData.length}</div>
+                          </div>
+                          <div style={{background:"#EDFBEE",borderRadius:8,padding:"10px 14px"}}>
+                            <div style={{fontSize:11,color:"#166534",marginBottom:2}}>Top branch</div>
+                            <div style={{fontSize:14,fontWeight:700,color:"#166534"}} dir="auto">{storeData[0]?.store||"—"}</div>
+                          </div>
+                          <div style={{background:"#FEF3C7",borderRadius:8,padding:"10px 14px"}}>
+                            <div style={{fontSize:11,color:"#92400E",marginBottom:2}}>Total overdue</div>
+                            <div style={{fontSize:20,fontWeight:700,color:"#92400E"}}>{storeData.reduce((s,d)=>s+d.overdue,0)}</div>
+                          </div>
+                          <div style={{background:"#f5f5f5",borderRadius:8,padding:"10px 14px"}}>
+                            <div style={{fontSize:11,color:"#555",marginBottom:2}}>No store assigned</div>
+                            <div style={{fontSize:20,fontWeight:700,color:"#555"}}>{noStore}</div>
+                          </div>
+                        </div>
+                        {/* per-store bars */}
+                        {storeData.map((s,i)=>(
+                          <div key={s.store} style={{marginBottom:14}}>
+                            <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4,alignItems:"center",flexWrap:"wrap",gap:6}}>
+                              <span style={{fontWeight:i<3?600:400}} dir="auto">
+                                {i===0?"🥇 ":i===1?"🥈 ":i===2?"🥉 ":""}{s.store}
+                              </span>
+                              <div style={{display:"flex",gap:10,fontSize:11,flexWrap:"wrap"}}>
+                                <span style={{color:"#555"}}>{s.count} orders</span>
+                                <span style={{color:"#534AB7",fontWeight:600}}>{s.meters.toLocaleString()}m</span>
+                                <span style={{color:"#166534"}}>✓ {s.done} done</span>
+                                {s.high>0&&<span style={{color:"#E24B4A"}}>⚡ {s.high} urgent</span>}
+                                {s.overdue>0&&<span style={{color:"#92400E",fontWeight:600}}>⚠ {s.overdue} overdue</span>}
+                                <span style={{color:"#aaa"}}>avg {s.avgSize}m/order</span>
                               </div>
-                              <Bar pct={Math.round(s.meters/maxM*100)}
-                                color={i===0?"#534AB7":i===1?"#7F77DD":"#c4c0f0"} h={8}/>
                             </div>
+                            <Bar pct={Math.round(s.meters/maxM*100)} color={i===0?"#534AB7":i===1?"#7F77DD":"#c4c0f0"} h={8}/>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {/* ── OVERDUE ANALYSIS ──────────────────────── */}
+                {(()=>{
+                  const today=new Date(); today.setHours(0,0,0,0)
+                  const overdueOrds=allOrders.filter(o=>
+                    o.warpStatus!=="done"&&o.deadline&&new Date(o.deadline)<today
+                  ).map(o=>{
+                    const days=Math.round((today.getTime()-new Date(o.deadline).getTime())/86400000)
+                    return {...o, daysLate:days}
+                  }).sort((a,b)=>b.daysLate-a.daysLate)
+
+                  const [showAll, setShowAll] = [overdueShowAll, setOverdueShowAll]
+                  const visible = showAll ? overdueOrds : overdueOrds.slice(0,10)
+
+                  // Group by how late
+                  const critical = overdueOrds.filter(o=>o.daysLate>14).length
+                  const warning  = overdueOrds.filter(o=>o.daysLate>7&&o.daysLate<=14).length
+                  const mild     = overdueOrds.filter(o=>o.daysLate<=7).length
+
+                  return (
+                    <div style={{...S.card,gridColumn:"1 / -1"}}>
+                      <div style={S.cHead} className="dtx-chead">
+                        <span style={S.cTitle}>⚠️ Overdue orders</span>
+                        <span style={S.cSub}>active orders past their deadline</span>
+                        {overdueOrds.length>0&&<span style={{marginLeft:"auto",padding:"3px 10px",borderRadius:20,background:"#FEEBEB",color:"#A32D2D",fontSize:11,fontWeight:600}}>{overdueOrds.length} overdue</span>}
+                      </div>
+                      <div style={S.cBody}>
+                        {overdueOrds.length===0?(
+                          <div style={{textAlign:"center",padding:"20px 0",color:"#166534",fontWeight:500}}>✅ No overdue orders right now</div>
+                        ):(
+                          <>
+                            {/* severity strip */}
+                            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}} className="dtx-metrics">
+                              <div style={{background:"#FEEBEB",borderRadius:8,padding:"10px 14px"}}>
+                                <div style={{fontSize:11,color:"#A32D2D",marginBottom:2}}>Critical (&gt;14 days)</div>
+                                <div style={{fontSize:22,fontWeight:700,color:"#A32D2D"}}>{critical}</div>
+                              </div>
+                              <div style={{background:"#FEF3C7",borderRadius:8,padding:"10px 14px"}}>
+                                <div style={{fontSize:11,color:"#92400E",marginBottom:2}}>Warning (8–14 days)</div>
+                                <div style={{fontSize:22,fontWeight:700,color:"#92400E"}}>{warning}</div>
+                              </div>
+                              <div style={{background:"#f5f5f5",borderRadius:8,padding:"10px 14px"}}>
+                                <div style={{fontSize:11,color:"#555",marginBottom:2}}>Mild (1–7 days)</div>
+                                <div style={{fontSize:22,fontWeight:700,color:"#555"}}>{mild}</div>
+                              </div>
+                            </div>
+                            {/* list */}
+                            <div style={{border:"0.5px solid #e5e5e5",borderRadius:8,overflow:"hidden"}}>
+                              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                                <thead>
+                                  <tr style={{background:"#f5f5f5"}}>
+                                    {["Days late","Code","Name","Qty","Deadline","Store","Priority"].map(h=>(
+                                      <th key={h} style={{padding:"7px 10px",textAlign:"right",fontWeight:500,color:"#555"}}>{h}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {visible.map(o=>{
+                                    const bg=o.daysLate>14?"#fff8f8":o.daysLate>7?"#fffbf0":"transparent"
+                                    const dc=o.daysLate>14?"#A32D2D":o.daysLate>7?"#92400E":"#555"
+                                    return (
+                                      <tr key={o.id} style={{background:bg,borderBottom:"0.5px solid #f5f5f5"}}>
+                                        <td style={{padding:"7px 10px",fontWeight:700,color:dc}}>{o.daysLate}d</td>
+                                        <td style={{padding:"7px 10px",fontWeight:600}}>{o.textileCode}</td>
+                                        <td style={{padding:"7px 10px",color:"#555"}} dir="auto">{o.textileName||"—"}</td>
+                                        <td style={{padding:"7px 10px",color:"#534AB7",fontWeight:600}}>{o.quantity}m</td>
+                                        <td style={{padding:"7px 10px",color:"#aaa"}}>{o.deadline}</td>
+                                        <td style={{padding:"7px 10px"}} dir="auto">{o.store||"—"}</td>
+                                        <td style={{padding:"7px 10px"}}><span style={{padding:"2px 7px",borderRadius:20,fontSize:10,fontWeight:500,background:priColor(o.priority)+"22",color:priColor(o.priority)}}>{o.priority}</span></td>
+                                      </tr>
+                                    )
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                            {overdueOrds.length>10&&(
+                              <button style={{...S.btnSm,marginTop:10}} onClick={()=>setShowAll(v=>!v)}>
+                                {showAll?`Show less ▲`:`Show all ${overdueOrds.length} ▼`}
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {/* ── SEASONAL DEMAND ───────────────────────── */}
+                {(()=>{
+                  // Date range from preset
+                  const now=new Date()
+                  let fromDate: Date|null=null
+                  let toDate: Date|null=null
+                  if(seasonPreset==="month"){
+                    fromDate=new Date(now); fromDate.setDate(now.getDate()-30)
+                  } else if(seasonPreset==="3months"){
+                    fromDate=new Date(now); fromDate.setDate(now.getDate()-90)
+                  } else if(seasonPreset==="custom"){
+                    if(seasonFrom) fromDate=new Date(seasonFrom)
+                    if(seasonTo)   toDate=new Date(seasonTo)
+                  }
+
+                  const filtered=allOrders.filter(o=>{
+                    if(!o.orderDate) return false
+                    const d=new Date(o.orderDate)
+                    if(fromDate&&d<fromDate) return false
+                    if(toDate&&d>toDate) return false
+                    return true
+                  })
+
+                  // Group by baseCode+name
+                  const grouped: Record<string,{baseCode:string;name:string;meters:number;orders:number;variants:Record<string,number>}>={}
+                  for(const o of filtered){
+                    const base=o.textileCode.split("/")[0]
+                    if(!grouped[base]) grouped[base]={baseCode:base,name:o.textileName||"",meters:0,orders:0,variants:{}}
+                    grouped[base].meters+=o.quantity
+                    grouped[base].orders++
+                    grouped[base].variants[o.textileCode]=(grouped[base].variants[o.textileCode]||0)+o.quantity
+                  }
+                  const sorted=Object.values(grouped).sort((a,b)=>b.meters-a.meters).slice(0,15)
+                  const maxM=Math.max(...sorted.map(g=>g.meters),1)
+
+                  const presetLabel=seasonPreset==="month"?"Last 30 days":
+                    seasonPreset==="3months"?"Last 3 months":
+                    seasonPreset==="custom"&&(seasonFrom||seasonTo)?`${seasonFrom||"…"} → ${seasonTo||"…"}`:"All time"
+
+                  return (
+                    <div style={{...S.card,gridColumn:"1 / -1"}}>
+                      <div style={S.cHead} className="dtx-chead">
+                        <span style={S.cTitle}>📅 Textile demand by period</span>
+                        <span style={S.cSub}>{presetLabel} · {filtered.length} orders · {filtered.reduce((s,o)=>s+o.quantity,0).toLocaleString()}m</span>
+                      </div>
+                      <div style={S.cBody}>
+                        {/* period selector */}
+                        <div style={{display:"flex",gap:6,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
+                          {(["all","month","3months","custom"] as const).map(p=>(
+                            <button key={p} onClick={()=>setSeasonPreset(p)}
+                              style={{padding:"5px 14px",borderRadius:20,border:"0.5px solid",cursor:"pointer",fontSize:12,fontWeight:500,
+                                borderColor:seasonPreset===p?"#534AB7":"#e5e5e5",
+                                background:seasonPreset===p?"#534AB7":"#fff",
+                                color:seasonPreset===p?"#fff":"#555"}}>
+                              {p==="all"?"All time":p==="month"?"Last 30 days":p==="3months"?"Last 3 months":"Custom range"}
+                            </button>
                           ))}
-                          {noStore>0&&(
-                            <div style={{marginTop:8,fontSize:11,color:"#bbb"}}>
-                              {noStore} order{noStore>1?"s":""} with no store assigned
+                          {seasonPreset==="custom"&&(
+                            <div style={{display:"flex",gap:6,alignItems:"center",marginLeft:4}}>
+                              <input type="date" value={seasonFrom} onChange={e=>setSeasonFrom(e.target.value)}
+                                style={{padding:"4px 8px",border:"0.5px solid #e5e5e5",borderRadius:6,fontSize:12}}/>
+                              <span style={{color:"#aaa",fontSize:12}}>→</span>
+                              <input type="date" value={seasonTo} onChange={e=>setSeasonTo(e.target.value)}
+                                style={{padding:"4px 8px",border:"0.5px solid #e5e5e5",borderRadius:6,fontSize:12}}/>
                             </div>
                           )}
-                        </>
-                      )
-                    })()}
-                  </div>
-                </div>
+                        </div>
+                        {sorted.length===0?(
+                          <div style={S.empty}>No orders in this period.</div>
+                        ):(
+                          sorted.map((g,i)=>{
+                            const isOpen=expandedBase===`season_${g.baseCode}`
+                            const varSorted=Object.entries(g.variants).sort((a,b)=>b[1]-a[1])
+                            const maxV=Math.max(...varSorted.map(v=>v[1]),1)
+                            return (
+                              <div key={g.baseCode} style={{marginBottom:6}}>
+                                <div onClick={()=>setExpandedBase(isOpen?null:`season_${g.baseCode}`)}
+                                  style={{cursor:"pointer",padding:"8px 10px",borderRadius:8,
+                                    background:isOpen?"#F3F2FD":"transparent",
+                                    border:`0.5px solid ${isOpen?"#c4c0f0":"transparent"}`}}>
+                                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                                      <span style={{fontSize:12,color:"#888",minWidth:20}}>{i+1}</span>
+                                      <span style={{fontWeight:i<3?700:500,color:i===0?"#534AB7":i<3?"#1a1a1a":"#333",fontSize:13}} dir="auto">
+                                        {i===0?"🥇 ":i===1?"🥈 ":i===2?"🥉 ":""}{g.baseCode} — {g.name}
+                                      </span>
+                                    </div>
+                                    <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                                      <span style={{fontSize:12,color:"#534AB7",fontWeight:600}}>{g.meters.toLocaleString()}m</span>
+                                      <span style={{fontSize:11,color:"#aaa"}}>{g.orders} orders · {varSorted.length} variants</span>
+                                      <span style={{fontSize:11,color:"#7F77DD"}}>{isOpen?"▲":"▼"}</span>
+                                    </div>
+                                  </div>
+                                  <Bar pct={Math.round(g.meters/maxM*100)} color={i===0?"#534AB7":i<3?"#7F77DD":"#c4c0f0"} h={5}/>
+                                </div>
+                                {isOpen&&(
+                                  <div style={{marginLeft:28,marginTop:4,padding:"10px 12px",background:"#faf9ff",borderRadius:8,border:"0.5px solid #e8e6ff"}}>
+                                    {varSorted.map(([code,meters],j)=>(
+                                      <div key={code} style={{marginBottom:j<varSorted.length-1?8:0}}>
+                                        <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}>
+                                          <span style={{fontFamily:"monospace",color:"#534AB7",fontWeight:500}}>{code}</span>
+                                          <span style={{fontWeight:600}}>{meters.toLocaleString()}m</span>
+                                        </div>
+                                        <Bar pct={Math.round(meters/maxV*100)} color="#7F77DD" h={4}/>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })
+                        )}
+                      </div>
+                    </div>
+                  )
+                })()}
 
               </div>
             </div>
