@@ -2032,7 +2032,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <td dir="auto">${weave}</td>
         <td>${o.quantity}m</td>
         <td>${o.orderDate || "—"}</td>
-        <td>${o.priority}</td>
+        <td dir="auto">${o.store || "—"}</td>
       </tr>
     `}).join("")
 
@@ -2044,11 +2044,16 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Segoe UI', Arial, sans-serif; padding: 32px; color: #111; font-size: 13px; }
+    .topbar { position: fixed; top: 0; left: 0; right: 0; background: #534AB7; color: #fff; padding: 10px 24px; display: flex; align-items: center; gap: 16px; z-index: 999; }
+    .topbar button { background: #fff; color: #534AB7; border: none; padding: 6px 18px; border-radius: 6px; font-size: 13px; font-weight: 700; cursor: pointer; }
+    .topbar button:hover { background: #f0efff; }
+    .topbar span { font-size: 14px; font-weight: 600; }
+    .content { margin-top: 56px; }
     .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; border-bottom: 2px solid #111; padding-bottom: 16px; }
     .brand { font-size: 22px; font-weight: 700; color: #534AB7; }
     .meta { text-align: right; font-size: 12px; color: #555; line-height: 1.8; }
     h2 { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
-    .info { display: flex; gap: 32px; margin-bottom: 20px; }
+    .info { display: flex; gap: 32px; margin-bottom: 20px; flex-wrap: wrap; }
     .info-item { }
     .info-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
     .info-val { font-size: 15px; font-weight: 600; }
@@ -2062,10 +2067,15 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     .sig-box { text-align: center; }
     .sig-line { width: 140px; border-bottom: 1px solid #333; margin-bottom: 6px; height: 32px; }
     .sig-label { font-size: 11px; color: #555; }
-    @media print { body { padding: 16px; } }
+    @media print { .topbar { display: none; } .content { margin-top: 0; } body { padding: 16px; } }
   </style>
 </head>
 <body>
+  <div class="topbar">
+    <span>🖨 Warp Sheet — ${label}</span>
+    <button onclick="window.print()">🖨 Print</button>
+  </div>
+  <div class="content">
   <div class="header">
     <div>
       <div class="brand">Deebtex</div>
@@ -2110,7 +2120,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <th>Weave</th>
         <th>Quantity</th>
         <th>Order date</th>
-        <th>Priority</th>
+        <th>Branch</th>
       </tr>
     </thead>
     <tbody>${rows}</tbody>
@@ -2140,6 +2150,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     <span>Deebtex Factory Management</span>
     <span>Printed: ${date}</span>
   </div>
+  </div>
 </body>
 </html>`
 
@@ -2148,7 +2159,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     win.document.write(html)
     win.document.close()
     win.focus()
-    setTimeout(() => { win.print(); win.close() }, 400)
   }
   const knownColors = useMemo(() => {
     const seen = new Set(textiles.map(t => t.color).filter(Boolean))
