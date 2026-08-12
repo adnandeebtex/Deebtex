@@ -2771,9 +2771,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           const topColors = Object.entries(colorCount).sort((a,b)=>b[1]-a[1]).slice(0,8)
 
           // ── MOST ORDERED FABRIC TYPE ──────────────────────
-          const fabCount: Record<string,number> = {}
-          for (const o of allOrders) fabCount[o.fabricType] = (fabCount[o.fabricType]||0) + 1
-          const topFabrics = Object.entries(fabCount).sort((a,b)=>b[1]-a[1]).slice(0,8)
 
           // ── MACHINE UTILIZATION ───────────────────────────
           const machineMeters: Record<string,{name:string;meters:number;orders:number}> = {}
@@ -2918,108 +2915,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                   </div>
                 </div>
 
-                {/* ── TOP TEXTILES GROUPED BY BASE CODE ─────── */}
-                {(()=>{
-                  // Group by baseCode (first part of textileCode, e.g. "1138")
-                  const grouped: Record<string,{
-                    baseCode:string; name:string; totalMeters:number; totalOrders:number
-                    variants: {code:string; meters:number; orders:number}[]
-                  }> = {}
-
-                  for(const o of allOrders){
-                    const baseCode = o.textileCode.split("/")[0]
-                    const name     = o.textileName || ""
-                    const key      = baseCode
-                    if(!grouped[key]){
-                      grouped[key]={baseCode, name, totalMeters:0, totalOrders:0, variants:[]}
-                    }
-                    grouped[key].totalMeters += o.quantity
-                    grouped[key].totalOrders++
-                    // track per variant
-                    const vi = grouped[key].variants.findIndex(v=>v.code===o.textileCode)
-                    if(vi>=0){
-                      grouped[key].variants[vi].meters += o.quantity
-                      grouped[key].variants[vi].orders++
-                    } else {
-                      grouped[key].variants.push({code:o.textileCode, meters:o.quantity, orders:1})
-                    }
-                  }
-
-                  const sorted = Object.values(grouped)
-                    .sort((a,b)=>b.totalMeters-a.totalMeters)
-
-                  const maxM = Math.max(...sorted.map(g=>g.totalMeters), 1)
-
-                  return (
-                    <div style={{...S.card, gridColumn:"1 / -1"}}>
-                      <div style={S.cHead} className="dtx-chead">
-                        <span style={S.cTitle}>Most ordered textiles</span>
-                        <span style={S.cSub}>grouped by textile — click to expand variants</span>
-                      </div>
-                      <div style={S.cBody}>
-                        {sorted.length===0&&<div style={S.empty}>No orders yet.</div>}
-                        {sorted.map((g,i)=>{
-                          const isOpen = expandedBase===g.baseCode
-                          const variantsSorted = [...g.variants].sort((a,b)=>b.meters-a.meters)
-                          const maxV = Math.max(...variantsSorted.map(v=>v.meters),1)
-                          return (
-                            <div key={g.baseCode} style={{marginBottom:6}}>
-                              {/* Main row — clickable */}
-                              <div
-                                onClick={()=>setExpandedBase(isOpen?null:g.baseCode)}
-                                style={{cursor:"pointer",padding:"8px 10px",borderRadius:8,
-                                  background:isOpen?"#F3F2FD":"transparent",
-                                  border:`0.5px solid ${isOpen?"#c4c0f0":"transparent"}`,
-                                  transition:"all 0.15s"}}>
-                                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                                  <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                    <span style={{fontSize:12,color:"#888",fontVariantNumeric:"tabular-nums",minWidth:20}}>{i+1}</span>
-                                    <span style={{fontWeight:i<3?700:500,
-                                      color:i===0?"#534AB7":i<3?"#1a1a1a":"#333",fontSize:13}} dir="auto">
-                                      {i===0?"🥇 ":i===1?"🥈 ":i===2?"🥉 ":""}{g.baseCode} — {g.name}
-                                    </span>
-                                  </div>
-                                  <div style={{display:"flex",alignItems:"center",gap:12}}>
-                                    <span style={{fontSize:12,color:"#534AB7",fontWeight:600}}>{g.totalMeters.toLocaleString()}m</span>
-                                    <span style={{fontSize:11,color:"#aaa"}}>{g.totalOrders} orders · {g.variants.length} variants</span>
-                                    <span style={{fontSize:11,color:"#7F77DD"}}>{isOpen?"▲":"▼"}</span>
-                                  </div>
-                                </div>
-                                <Bar pct={Math.round(g.totalMeters/maxM*100)}
-                                  color={i===0?"#534AB7":i<3?"#7F77DD":"#c4c0f0"} h={5}/>
-                              </div>
-
-                              {/* Expanded variants */}
-                              {isOpen&&(
-                                <div style={{marginTop:4,marginLeft:28,padding:"10px 12px",
-                                  background:"#faf9ff",borderRadius:8,border:"0.5px solid #e8e6ff"}}>
-                                  {variantsSorted.map((v,j)=>(
-                                    <div key={v.code} style={{marginBottom:j<variantsSorted.length-1?8:0}}>
-                                      <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}>
-                                        <span style={{fontFamily:"monospace",color:"#534AB7",fontWeight:500}}>{v.code}</span>
-                                        <div style={{display:"flex",gap:12}}>
-                                          <span style={{fontWeight:600}}>{v.meters.toLocaleString()}m</span>
-                                          <span style={{color:"#aaa"}}>{v.orders} orders</span>
-                                        </div>
-                                      </div>
-                                      <Bar pct={Math.round(v.meters/maxV*100)} color="#7F77DD" h={4}/>
-                                    </div>
-                                  ))}
-                                  <div style={{marginTop:8,paddingTop:8,borderTop:"0.5px solid #e8e6ff",
-                                    fontSize:11,color:"#888",display:"flex",gap:16}}>
-                                    <span>Total: <strong style={{color:"#534AB7"}}>{g.totalMeters}m</strong></span>
-                                    <span>Orders: <strong>{g.totalOrders}</strong></span>
-                                    <span>Variants: <strong>{g.variants.length}</strong></span>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )
-                })()}
 
                 {/* ── TOP COLORS ────────────────────────────── */}
                 <div style={S.card}>
@@ -3043,27 +2938,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                   </div>
                 </div>
 
-                {/* ── TOP FABRIC TYPES ──────────────────────── */}
-                <div style={S.card}>
-                  <div style={S.cHead} className="dtx-chead">
-                    <span style={S.cTitle}>Most ordered fabric types</span>
-                  </div>
-                  <div style={S.cBody}>
-                    {topFabrics.length===0&&<div style={S.empty}>No orders yet.</div>}
-                    {topFabrics.map(([fab,cnt],i)=>{
-                      const pc=Math.round(cnt/Math.max(...topFabrics.map(f=>f[1]))*100)
-                      return (
-                        <div key={fab} style={{marginBottom:10}}>
-                          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:3}}>
-                            <span dir="auto">{fab}</span>
-                            <span style={{color:"#888"}}>{cnt} orders</span>
-                          </div>
-                          <Bar pct={pc} color={`hsl(${200+i*20},60%,50%)`} h={6}/>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
 
                 {/* ── MACHINE UTILIZATION ───────────────────── */}
                 <div style={S.card}>
