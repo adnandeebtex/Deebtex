@@ -3689,8 +3689,14 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             const texMap:Record<string,Textile>={}
             for(const t of textiles) texMap[t.code]=t
 
-            const exKeys=new Set(
-              orders.map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}`)
+            // Build TWO lookup sets from existing orders:
+            // 1. With order number (for orders that have one)
+            // 2. Without order number (fallback for manually entered orders)
+            const exKeysWithOn=new Set(
+              orders.filter(o=>o.orderNumber).map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${o.orderNumber}`)
+            )
+            const exKeysNoOn=new Set(
+              orders.filter(o=>!o.orderNumber).map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}`)
             )
 
             function fmtDate(v:unknown):string {
@@ -3719,7 +3725,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
             const rows:ImportRow[]=[]
             const seen=new Set<string>()
-            let debugLogged=false
 
             for(const row of raw){
               const on   = String(row[0]||"").trim()
@@ -3739,17 +3744,19 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               const cc = String(row[13]||"01").trim().padStart(2,"0")
               const appCode = `${parseInt(ic,10)}/${pc}/${cc}`
 
-              const dk = `${appCode}||${ordered}||${qty}`
-              if(!debugLogged){
-                console.log("First row raw dates:", {col5:row[5], col7:row[7], ordered, due, appCode, qty, dk})
-                console.log("Sample exKey:", [...exKeys].slice(0,3))
-                debugLogged=true
-              }
-              if(seen.has(dk)) continue
-              seen.add(dk)
+              // Smart duplicate check:
+              // - If Excel order has an order number → match on code+date+qty+orderNum
+              // - If no order number → fall back to code+date+qty
+              const dkFull = `${appCode}||${ordered}||${qty}||${on}`
+              const dkBase = `${appCode}||${ordered}||${qty}`
+              const dk = dkFull  // use full key for dedup within this import run
+              if(seen.has(dkFull)) continue
+              seen.add(dkFull)
+
+              const isDup = exKeysWithOn.has(dkFull) || exKeysNoOn.has(dkBase)
 
               const tex = texMap[appCode]||null
-              const status:ImportRow["status"] = !tex?"no-textile":exKeys.has(dk)?"duplicate":"new"
+              const status:ImportRow["status"] = !tex?"no-textile":isDup?"duplicate":"new"
 
               rows.push({
                 appCode, textileName:tex?tex.name:String(row[18]||"").trim(),
@@ -3807,9 +3814,18 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           const nNew  = importRows.filter(r=>r.status==="new").length
           const nDup  = importRows.filter(r=>r.status==="duplicate").length
           const nNoTex= importRows.filter(r=>r.status==="no-textile").length
-          const pdfKeys=new Set(importRows.map(r=>`${r.appCode}||${r.ordered}||${r.qty}`))
+          const pdfKeysFull=new Set(importRows.map(r=>`${r.appCode}||${r.ordered}||${r.qty}||${r.orderNum}`))
+          const pdfKeysBase=new Set(importRows.map(r=>`${r.appCode}||${r.ordered}||${r.qty}`))
           const possiblyDone=(importStatus==="preview"||importStatus==="done")
-            ?orders.filter(o=>o.warpStatus!=="done"&&!pdfKeys.has(`${o.textileCode}||${o.orderDate||""}||${o.quantity}`))
+            ?orders.filter(o=>{
+              if(o.warpStatus==="done") return false
+              const full=`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`
+              const base=`${o.textileCode}||${o.orderDate||""}||${o.quantity}`
+              // An order is "possibly done" only if it doesn't appear in the PDF at all
+              // If it has an order number, check full key; otherwise check base key
+              if(o.orderNumber) return !pdfKeysFull.has(full)
+              return !pdfKeysBase.has(base)
+            })
             :[]
 
           return (
