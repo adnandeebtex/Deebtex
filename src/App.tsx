@@ -3749,7 +3749,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
               // - If no order number → fall back to code+date+qty
               const dkFull = `${appCode}||${ordered}||${qty}||${on}`
               const dkBase = `${appCode}||${ordered}||${qty}`
-              const dk = dkFull  // use full key for dedup within this import run
               if(seen.has(dkFull)) continue
               seen.add(dkFull)
 
