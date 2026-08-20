@@ -3462,64 +3462,68 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           const suggestions: Suggestion[] = []
 
           // ── ANALYSIS 1: overloaded machine has warps that can move
-          // Group orders by warp (fabricType+color) on each overloaded machine
-          // then suggest moving the whole warp group, not individual orders
+          // Group by warpKey (fabricType+color) AND baseCode so only truly same-textile orders group
           for (const m of machines) {
             const ld  = machineLoad(schedule, m.id)
             const cap = m.capacity ?? DEFAULT_CAP
-            if (ld <= cap) continue   // not overloaded
+            if (ld <= cap) continue
 
             const machineOrders = (schedule[m.id] ?? []).filter(o => o.warpStatus === "not-started")
 
-            // Group by warpKey
+            // Group by fabricType + color + baseCode (first part of textileCode)
             const warpGroups: Record<string, Order[]> = {}
             for (const o of machineOrders) {
-              const wk = warpKey(o)
-              if (!warpGroups[wk]) warpGroups[wk] = []
-              warpGroups[wk].push(o)
+              const baseCode = o.textileCode.split("/")[0]
+              const key = `${o.fabricType}||${o.color}||${baseCode}`
+              if (!warpGroups[key]) warpGroups[key] = []
+              warpGroups[key].push(o)
             }
 
-            for (const [wk, groupOrders] of Object.entries(warpGroups)) {
-              // All orders in group must be movable (support >1 machine category)
+            for (const [, groupOrders] of Object.entries(warpGroups)) {
+              const totalWarpMeters = groupOrders.reduce((s, o) => s + o.quantity, 0)
+
+              // Movable = orders that support more than one machine category
               const movable = groupOrders.filter(o => o.machineCategories.length > 1)
               if (!movable.length) continue
 
-              const totalMeters = movable.reduce((s, o) => s + o.quantity, 0)
+              const movableMeters = movable.reduce((s, o) => s + o.quantity, 0)
+              const lockedMeters  = totalWarpMeters - movableMeters
+              const rep = movable[0]  // representative order for machine matching
 
-              // Find a compatible machine with capacity for the whole warp
+              // Find a compatible machine with capacity for the movable orders
               const alternatives = machines.filter(alt =>
                 alt.id !== m.id &&
                 !alt.outOfOrder &&
-                movable[0].machineCategories.includes(alt.category) &&
-                machineLoad(schedule, alt.id) + totalMeters <= (alt.capacity ?? DEFAULT_CAP) * 1.15
+                rep.machineCategories.includes(alt.category) &&
+                machineLoad(schedule, alt.id) + movableMeters <= (alt.capacity ?? DEFAULT_CAP) * 1.15
               )
               if (!alternatives.length) continue
 
-              // Prefer machine that already has same warp, then least loaded
               const best = alternatives.reduce((b, alt) => {
-                const altQ     = schedule[alt.id] ?? []
-                const sameWarp = altQ.some(x => warpKey(x) === wk)
-                const bQ       = schedule[b.id] ?? []
-                const bSameWarp = bQ.some(x => warpKey(x) === wk)
+                const altQ      = schedule[alt.id] ?? []
+                const sameWarp  = altQ.some(x => warpKey(x) === warpKey(rep))
+                const bQ        = schedule[b.id] ?? []
+                const bSameWarp = bQ.some(x => warpKey(x) === warpKey(rep))
                 if (sameWarp && !bSameWarp) return alt
                 if (!sameWarp && bSameWarp) return b
                 return machineLoad(schedule, alt.id) < machineLoad(schedule, b.id) ? alt : b
               })
 
-              const sameWarp   = (schedule[best.id] ?? []).some(x => warpKey(x) === wk)
-              const [fab, col] = wk.split("||")
-              const warpLabel  = `${fab} · ${col}`
-              const pct        = Math.round(ld / cap * 100)
-              const partialNote = movable.length < groupOrders.length
-                ? ` (${groupOrders.length - movable.length} order${groupOrders.length-movable.length>1?"s":""} must stay)`
+              const sameWarp  = (schedule[best.id] ?? []).some(x => warpKey(x) === warpKey(rep))
+              const warpLabel = `${rep.color} · ${rep.fabricType}`
+              const pct       = Math.round(ld / cap * 100)
+
+              // Build the detail message clearly
+              const partialNote = lockedMeters > 0
+                ? ` ${lockedMeters}m must stay on ${m.name} (needs ${m.category} only).`
                 : ""
 
               suggestions.push({
-                id: `move-warp-${m.id}-${wk}`,
+                id: `move-warp-${m.id}-${rep.fabricType}-${rep.color}-${rep.textileCode.split("/")[0]}`,
                 type: "move-to-free-machine",
                 title: `Move "${warpLabel}" warp off overloaded ${m.name}`,
-                detail: `The "${warpLabel}" warp has ${movable.length} order${movable.length>1?"s":""} totalling ${totalMeters}m on ${m.name} (at ${pct}% capacity). It can move to ${best.name} which has room.${sameWarp?" ✦ Same warp already on "+best.name+" — no changeover needed.":""}${partialNote}`,
-                impact: `Frees ${totalMeters}m from ${m.name} · ${sameWarp?"zero extra changeover":"one new changeover on "+best.name}`,
+                detail: `The full "${warpLabel}" warp is ${totalWarpMeters}m on ${m.name} (at ${pct}% capacity). You can switch ${movableMeters}m (${movable.length} order${movable.length>1?"s":""}) to ${best.name} which has room.${partialNote}${sameWarp ? " ✦ Same warp already on "+best.name+"." : ""}`,
+                impact: `Moves ${movableMeters}m of ${totalWarpMeters}m warp to ${best.name} · ${sameWarp ? "no extra changeover" : "one new changeover on "+best.name}`,
                 affectedOrderIds: movable.map(o => o.id),
                 targetMachineId: best.id,
                 severity: pct > 130 ? "high" : "medium",
@@ -3662,7 +3666,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                             <button
                               style={{...S.btnSm,fontSize:11,marginBottom:isExpanded?10:0}}
                               onClick={()=>setExpandedSuggestion(isExpanded?null:sg.id)}>
-                              {isExpanded?`▲ Hide orders`:`▼ Show ${sgOrders.length} orders in this warp`}
+                              {isExpanded?`▲ Hide orders`:`▼ Show ${sgOrders.length} switchable order${sgOrders.length>1?"s":""} (${totalM}m)`}
                             </button>
                             {isExpanded&&(
                               <div style={{border:"0.5px solid #e8e6ff",borderRadius:8,overflow:"hidden",marginTop:8}}>
