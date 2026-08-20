@@ -3470,16 +3470,16 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
             const machineOrders = (schedule[m.id] ?? []).filter(o => o.warpStatus === "not-started")
 
-            // Group by fabricType + color + baseCode (first part of textileCode)
+            // Group by fabricType + color only — this IS the warp definition
+            // (same as warpKey used by the scheduler)
             const warpGroups: Record<string, Order[]> = {}
             for (const o of machineOrders) {
-              const baseCode = o.textileCode.split("/")[0]
-              const key = `${o.fabricType}||${o.color}||${baseCode}`
+              const key = `${o.fabricType}||${o.color}`
               if (!warpGroups[key]) warpGroups[key] = []
               warpGroups[key].push(o)
             }
 
-            for (const [, groupOrders] of Object.entries(warpGroups)) {
+            for (const [wk, groupOrders] of Object.entries(warpGroups)) {
               const totalWarpMeters = groupOrders.reduce((s, o) => s + o.quantity, 0)
 
               // Movable = orders that support more than one machine category
@@ -3488,9 +3488,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
               const movableMeters = movable.reduce((s, o) => s + o.quantity, 0)
               const lockedMeters  = totalWarpMeters - movableMeters
-              const rep = movable[0]  // representative order for machine matching
+              const rep = movable[0]
 
-              // Find a compatible machine with capacity for the movable orders
+              // Find a compatible machine with capacity
               const alternatives = machines.filter(alt =>
                 alt.id !== m.id &&
                 !alt.outOfOrder &&
@@ -3501,25 +3501,24 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
               const best = alternatives.reduce((b, alt) => {
                 const altQ      = schedule[alt.id] ?? []
-                const sameWarp  = altQ.some(x => warpKey(x) === warpKey(rep))
+                const sameWarp  = altQ.some(x => warpKey(x) === wk)
                 const bQ        = schedule[b.id] ?? []
-                const bSameWarp = bQ.some(x => warpKey(x) === warpKey(rep))
+                const bSameWarp = bQ.some(x => warpKey(x) === wk)
                 if (sameWarp && !bSameWarp) return alt
                 if (!sameWarp && bSameWarp) return b
                 return machineLoad(schedule, alt.id) < machineLoad(schedule, b.id) ? alt : b
               })
 
-              const sameWarp  = (schedule[best.id] ?? []).some(x => warpKey(x) === warpKey(rep))
-              const warpLabel = `${rep.color} · ${rep.fabricType}`
-              const pct       = Math.round(ld / cap * 100)
-
-              // Build the detail message clearly
+              const sameWarp  = (schedule[best.id] ?? []).some(x => warpKey(x) === wk)
+              const [fab, col] = wk.split("||")
+              const warpLabel  = `${col} · ${fab}`
+              const pct        = Math.round(ld / cap * 100)
               const partialNote = lockedMeters > 0
                 ? ` ${lockedMeters}m must stay on ${m.name} (needs ${m.category} only).`
                 : ""
 
               suggestions.push({
-                id: `move-warp-${m.id}-${rep.fabricType}-${rep.color}-${rep.textileCode.split("/")[0]}`,
+                id: `move-warp-${m.id}-${wk}`,
                 type: "move-to-free-machine",
                 title: `Move "${warpLabel}" warp off overloaded ${m.name}`,
                 detail: `The full "${warpLabel}" warp is ${totalWarpMeters}m on ${m.name} (at ${pct}% capacity). You can switch ${movableMeters}m (${movable.length} order${movable.length>1?"s":""}) to ${best.name} which has room.${partialNote}${sameWarp ? " ✦ Same warp already on "+best.name+"." : ""}`,
