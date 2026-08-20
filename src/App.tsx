@@ -1298,6 +1298,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [warpGroupSearch, setWarpGroupSearch] = useState("")
   const [confirmDeleteOrder, setConfirmDeleteOrder] = useState<Order|null>(null)
   const [expandedBase, setExpandedBase] = useState<string|null>(null)
+  const [expandedSuggestion, setExpandedSuggestion] = useState<string|null>(null)
   const [seasonPreset, setSeasonPreset] = useState<"all"|"month"|"3months"|"custom">("all")
   const [seasonFrom,   setSeasonFrom]   = useState("")
   const [seasonTo,     setSeasonTo]     = useState("")
@@ -3460,45 +3461,68 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
           const suggestions: Suggestion[] = []
 
-          // ── ANALYSIS 1: overloaded machine has flexible orders
-          // Find orders on overloaded machines that can run on another machine with capacity
+          // ── ANALYSIS 1: overloaded machine has warps that can move
+          // Group orders by warp (fabricType+color) on each overloaded machine
+          // then suggest moving the whole warp group, not individual orders
           for (const m of machines) {
-            const ld = machineLoad(schedule, m.id)
+            const ld  = machineLoad(schedule, m.id)
             const cap = m.capacity ?? DEFAULT_CAP
             if (ld <= cap) continue   // not overloaded
 
             const machineOrders = (schedule[m.id] ?? []).filter(o => o.warpStatus === "not-started")
+
+            // Group by warpKey
+            const warpGroups: Record<string, Order[]> = {}
             for (const o of machineOrders) {
-              if (o.machineCategories.length < 2) continue   // can't move — only fits this machine
-              // find a compatible machine with available capacity
+              const wk = warpKey(o)
+              if (!warpGroups[wk]) warpGroups[wk] = []
+              warpGroups[wk].push(o)
+            }
+
+            for (const [wk, groupOrders] of Object.entries(warpGroups)) {
+              // All orders in group must be movable (support >1 machine category)
+              const movable = groupOrders.filter(o => o.machineCategories.length > 1)
+              if (!movable.length) continue
+
+              const totalMeters = movable.reduce((s, o) => s + o.quantity, 0)
+
+              // Find a compatible machine with capacity for the whole warp
               const alternatives = machines.filter(alt =>
                 alt.id !== m.id &&
                 !alt.outOfOrder &&
-                o.machineCategories.includes(alt.category) &&
-                machineLoad(schedule, alt.id) + o.quantity <= (alt.capacity ?? DEFAULT_CAP)
+                movable[0].machineCategories.includes(alt.category) &&
+                machineLoad(schedule, alt.id) + totalMeters <= (alt.capacity ?? DEFAULT_CAP) * 1.15
               )
               if (!alternatives.length) continue
-              // pick best alternative — same warp bonus or least loaded
+
+              // Prefer machine that already has same warp, then least loaded
               const best = alternatives.reduce((b, alt) => {
-                const altQ = schedule[alt.id] ?? []
-                const sameWarp = altQ.some(x => warpKey(x) === warpKey(o))
-                const bQ = schedule[b.id] ?? []
-                const bSameWarp = bQ.some(x => warpKey(x) === warpKey(o))
+                const altQ     = schedule[alt.id] ?? []
+                const sameWarp = altQ.some(x => warpKey(x) === wk)
+                const bQ       = schedule[b.id] ?? []
+                const bSameWarp = bQ.some(x => warpKey(x) === wk)
                 if (sameWarp && !bSameWarp) return alt
                 if (!sameWarp && bSameWarp) return b
-                return machineLoad(schedule,alt.id) < machineLoad(schedule,b.id) ? alt : b
+                return machineLoad(schedule, alt.id) < machineLoad(schedule, b.id) ? alt : b
               })
-              const altQ = schedule[best.id] ?? []
-              const sameWarp = altQ.some(x => warpKey(x) === warpKey(o))
+
+              const sameWarp   = (schedule[best.id] ?? []).some(x => warpKey(x) === wk)
+              const [fab, col] = wk.split("||")
+              const warpLabel  = `${fab} · ${col}`
+              const pct        = Math.round(ld / cap * 100)
+              const partialNote = movable.length < groupOrders.length
+                ? ` (${groupOrders.length - movable.length} order${groupOrders.length-movable.length>1?"s":""} must stay)`
+                : ""
+
               suggestions.push({
-                id: `move-${o.id}`,
+                id: `move-warp-${m.id}-${wk}`,
                 type: "move-to-free-machine",
-                title: `Move "${orderLabel(o)}" off overloaded ${m.name}`,
-                detail: `This order (${o.quantity}m · ${o.fabricType} · ${o.color}) is on ${m.name} which is at ${Math.round(ld/cap*100)}% capacity. It can also run on ${best.name} which has room.${sameWarp ? " ✦ Same warp already on "+best.name+" — no changeover needed." : ""}`,
-                impact: `Frees ${o.quantity}m from ${m.name} · ${sameWarp ? "zero extra changeover" : "one new changeover on "+best.name}`,
-                affectedOrderIds: [o.id],
+                title: `Move "${warpLabel}" warp off overloaded ${m.name}`,
+                detail: `The "${warpLabel}" warp has ${movable.length} order${movable.length>1?"s":""} totalling ${totalMeters}m on ${m.name} (at ${pct}% capacity). It can move to ${best.name} which has room.${sameWarp?" ✦ Same warp already on "+best.name+" — no changeover needed.":""}${partialNote}`,
+                impact: `Frees ${totalMeters}m from ${m.name} · ${sameWarp?"zero extra changeover":"one new changeover on "+best.name}`,
+                affectedOrderIds: movable.map(o => o.id),
                 targetMachineId: best.id,
-                severity: ld/cap > 1.3 ? "high" : "medium",
+                severity: pct > 130 ? "high" : "medium",
               })
             }
           }
@@ -3596,7 +3620,11 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                 </div>
               )}
 
-              {sorted.map(sg=>(
+              {sorted.map(sg=>{
+                const isExpanded = expandedSuggestion === sg.id
+                const sgOrders = sg.affectedOrderIds.map(id=>orders.find(o=>o.id===id)).filter(Boolean) as Order[]
+                const totalM = sgOrders.reduce((s,o)=>s+o.quantity,0)
+                return (
                 <div key={sg.id} style={{...S.card,marginBottom:12,borderLeft:`3px solid ${
                   sg.severity==="high"?"#E24B4A":sg.severity==="medium"?"#EF9F27":"#639922"
                 }`}}>
@@ -3610,18 +3638,68 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                         {sg.type==="move-to-free-machine"?"🔀":sg.type==="merge-warps"?"🧵":"⚡"}
                       </div>
                       <div style={{flex:1}}>
-                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
                           <span style={{fontSize:14,fontWeight:600}}>{sg.title}</span>
                           <span style={{
                             fontSize:10,fontWeight:600,padding:"1px 7px",borderRadius:20,
                             background:sg.severity==="high"?"#FEEBEB":sg.severity==="medium"?"#FEF3C7":"#EDFBEE",
                             color:sg.severity==="high"?"#A32D2D":sg.severity==="medium"?"#92400E":"#166534",
                           }}>{sg.severity.toUpperCase()}</span>
+                          {sgOrders.length>1&&(
+                            <span style={{fontSize:11,color:"#888"}}>
+                              {sgOrders.length} orders · {totalM}m total
+                            </span>
+                          )}
                         </div>
                         <div style={{fontSize:13,color:"#555",marginBottom:6,lineHeight:1.5}}>{sg.detail}</div>
-                        <div style={{fontSize:12,color:"#7F77DD",fontWeight:500,marginBottom:12}}>
+                        <div style={{fontSize:12,color:"#7F77DD",fontWeight:500,marginBottom:10}}>
                           📈 Impact: {sg.impact}
                         </div>
+
+                        {/* Expandable order list */}
+                        {sgOrders.length>1&&(
+                          <div style={{marginBottom:12}}>
+                            <button
+                              style={{...S.btnSm,fontSize:11,marginBottom:isExpanded?10:0}}
+                              onClick={()=>setExpandedSuggestion(isExpanded?null:sg.id)}>
+                              {isExpanded?`▲ Hide orders`:`▼ Show ${sgOrders.length} orders in this warp`}
+                            </button>
+                            {isExpanded&&(
+                              <div style={{border:"0.5px solid #e8e6ff",borderRadius:8,overflow:"hidden",marginTop:8}}>
+                                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                                  <thead>
+                                    <tr style={{background:"#F3F2FD"}}>
+                                      {["Code","Name","Qty","Order date","Store","Priority"].map(h=>(
+                                        <th key={h} style={{padding:"6px 10px",textAlign:"right",fontWeight:500,color:"#534AB7",fontSize:11}}>{h}</th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {sgOrders.map((o,i)=>(
+                                      <tr key={o.id} style={{background:i%2===0?"transparent":"#faf9ff",borderBottom:"0.5px solid #f0eeff"}}>
+                                        <td style={{padding:"6px 10px",fontWeight:600,fontSize:11}}>{o.textileCode}</td>
+                                        <td style={{padding:"6px 10px",color:"#555"}} dir="auto">{o.textileName||"—"}</td>
+                                        <td style={{padding:"6px 10px",fontWeight:600,color:"#534AB7"}}>{o.quantity}m</td>
+                                        <td style={{padding:"6px 10px",color:"#aaa"}}>{o.orderDate||"—"}</td>
+                                        <td style={{padding:"6px 10px"}} dir="auto">{o.store||"—"}</td>
+                                        <td style={{padding:"6px 10px"}}>
+                                          <span style={{padding:"1px 6px",borderRadius:20,fontSize:10,fontWeight:500,
+                                            background:priColor(o.priority)+"22",color:priColor(o.priority)}}>
+                                            {o.priority}
+                                          </span>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                                <div style={{padding:"8px 10px",background:"#F3F2FD",fontSize:12,fontWeight:600,color:"#534AB7",textAlign:"right" as const}}>
+                                  Total: {totalM}m across {sgOrders.length} orders
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                         <div style={{display:"flex",gap:8}}>
                           <button
                             style={{...S.btnPrimary,fontSize:12,padding:"6px 16px"}}
@@ -3635,7 +3713,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                                   await forceSwitch(oid, sg.targetMachineId)
                                 }
                               } else if (sg.type==="split-overloaded" && sg.targetMachineId) {
-                                // move urgent order to front by clearing its force and bumping warp order
                                 const o = orders.find(x=>x.id===sg.affectedOrderIds[0])
                                 if (o) moveWarpGroup(sg.targetMachineId, warpKey(o), "up")
                               }
@@ -3651,7 +3728,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                     </div>
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
           )
         })()}
