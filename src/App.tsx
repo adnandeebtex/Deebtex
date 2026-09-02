@@ -338,7 +338,7 @@ const DEFAULT_CAP = 1000
 // ─── SUPABASE HELPERS ────────────────────────────────────────
 // Fetches ALL rows using pagination — Supabase default limit is 1000 rows.
 // This loops until every row is loaded so no orders are ever silently dropped.
-async function dbLoadRaw<T>(table: string): Promise<T[]> {
+async function dbLoadRaw<T>(table: string, orderBy = "id"): Promise<T[]> {
   const PAGE = 1000
   let all: T[] = []
   let from = 0
@@ -346,7 +346,7 @@ async function dbLoadRaw<T>(table: string): Promise<T[]> {
     const { data, error } = await db
       .from(table)
       .select("*")
-      .order("id")
+      .order(orderBy)
       .range(from, from + PAGE - 1)
     if (error) { console.error(`dbLoad ${table}:`, error.message); break }
     if (!data || data.length === 0) break
@@ -1365,7 +1365,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       const [m, o, t, th, sl, ts, fam] = await Promise.all([
         dbLoadMachines(), dbLoadOrders(), dbLoadTextiles(),
         dbLoadThreads(), dbLoadStockLog(), dbLoadTextileStock(),
-        dbLoadRaw("textile_families"),
+        dbLoadRaw("textile_families", "base_code"),
       ])
       const [recoveredO, recoveredT] = await Promise.all([
         recoverFromBackup("orders",   "dtx_orders",   o, sanitizeOrder),
