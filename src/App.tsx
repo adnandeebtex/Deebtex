@@ -4350,7 +4350,11 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                         name:newFam.name.trim(),
                         production_code:newFam.production_code.trim()
                       }
-                      await dbUpsert("textile_families", fam as unknown as Record<string,unknown>)
+                      await fetch(`${SUPABASE_URL}/rest/v1/textile_families`,{
+                        method:"POST",
+                        headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Content-Type":"application/json","Prefer":"resolution=merge-duplicates"},
+                        body:JSON.stringify(fam)
+                      })
                       setTextileFamilies(p=>[...p.filter(f=>f.base_code!==fam.base_code),fam].sort((a,b)=>a.base_code.localeCompare(b.base_code)))
                       setNewFam({base_code:"",name:"",production_code:""})
                     }}>+ Add</button>
@@ -4388,7 +4392,11 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                                     <div style={{display:"flex",gap:6}}>
                                       <button style={{...S.btnPrimary,fontSize:11,padding:"4px 10px"}} onClick={async()=>{
                                         if(!editFam) return
-                                        await dbUpsert("textile_families", editFam as unknown as Record<string,unknown>)
+                                        await fetch(`${SUPABASE_URL}/rest/v1/textile_families?base_code=eq.${editFam.base_code}`,{
+                                          method:"PATCH",
+                                          headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Content-Type":"application/json"},
+                                          body:JSON.stringify({name:editFam.name,production_code:editFam.production_code})
+                                        })
                                         setTextileFamilies(p=>p.map(x=>x.base_code===editFam.base_code?editFam:x))
                                         setEditFam(null)
                                       }}>Save</button>
@@ -4406,9 +4414,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                                       <button style={S.btnIcon} onClick={()=>setEditFam({...f})}>✏️</button>
                                       <button style={S.btnIcon} onClick={async()=>{
                                         if(!window.confirm(`Delete production code for ${f.base_code}?`)) return
-                                        await fetch(`${import.meta.env.VITE_SUPABASE_URL}/rest/v1/textile_families?base_code=eq.${f.base_code}`,{
+                                        await fetch(`${SUPABASE_URL}/rest/v1/textile_families?base_code=eq.${f.base_code}`,{
                                           method:"DELETE",
-                                          headers:{"apikey":import.meta.env.VITE_SUPABASE_ANON_KEY,"Authorization":`Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`}
+                                          headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`}
                                         })
                                         setTextileFamilies(p=>p.filter(x=>x.base_code!==f.base_code))
                                       }}>🗑</button>
