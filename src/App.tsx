@@ -285,6 +285,12 @@ type TextileStock = {
   notes: string
 }
 
+type TextileFamily = {
+  base_code: string       // e.g. "1138"
+  name: string            // e.g. "مونتانا"
+  production_code: string // e.g. "16547"
+}
+
 type Machine = {
   id: number; name: string; category: MachineCategory; capacity: number
   outOfOrder?: boolean   // true = machine is down, orders reassigned automatically
@@ -1217,6 +1223,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [threads,      setThreads]      = useState<Thread[]>([])
   const [stockLog,     setStockLog]     = useState<StockLogEntry[]>([])
   const [textileStock, setTextileStock] = useState<TextileStock[]>([])
+  const [textileFamilies, setTextileFamilies] = useState<TextileFamily[]>([])
   const [schedule,  setSchedule]  = useState<Record<number,Order[]>>({})
   const [ready,     setReady]     = useState(false)
   const [view,      setView]      = useState<View>("dashboard")
@@ -1299,6 +1306,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [confirmDeleteOrder, setConfirmDeleteOrder] = useState<Order|null>(null)
   const [expandedBase, setExpandedBase] = useState<string|null>(null)
   const [expandedSuggestion, setExpandedSuggestion] = useState<string|null>(null)
+  const [showFamilies, setShowFamilies] = useState(false)
+  const [editFam, setEditFam] = useState<TextileFamily|null>(null)
+  const [newFam, setNewFam] = useState<TextileFamily>({base_code:"",name:"",production_code:""})
   const [seasonPreset, setSeasonPreset] = useState<"all"|"month"|"3months"|"custom">("all")
   const [seasonFrom,   setSeasonFrom]   = useState("")
   const [seasonTo,     setSeasonTo]     = useState("")
@@ -1352,9 +1362,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     }
 
     async function loadAll() {
-      const [m, o, t, th, sl, ts] = await Promise.all([
+      const [m, o, t, th, sl, ts, fam] = await Promise.all([
         dbLoadMachines(), dbLoadOrders(), dbLoadTextiles(),
         dbLoadThreads(), dbLoadStockLog(), dbLoadTextileStock(),
+        dbLoadRaw("textile_families"),
       ])
       const [recoveredO, recoveredT] = await Promise.all([
         recoverFromBackup("orders",   "dtx_orders",   o, sanitizeOrder),
@@ -1362,6 +1373,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       ])
       setMachines(m); setOrders(recoveredO); setTextiles(recoveredT)
       setThreads(th); setStockLog(sl); setTextileStock(ts)
+      setTextileFamilies((fam as TextileFamily[]) || [])
       setReady(true)
     }
     loadAll()
@@ -2026,9 +2038,13 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
     const date = new Date().toLocaleDateString("en-GB")
     const rows = groupOrders.map((o, i) => {
-      const textile = textiles.find(t => t.code === o.textileCode)
-      const pattern = textile?.pattern || "—"
-      const weave   = textile?.weave   || "—"
+      const textile      = textiles.find(t => t.code === o.textileCode)
+      const pattern      = textile?.pattern || "—"
+      const weave        = textile?.weave   || "—"
+      const baseCode     = o.textileCode.split("/")[0]
+      const colorCodePart= o.textileCode.split("/")[2] || "—"
+      const family       = textileFamilies.find(f => f.base_code === baseCode)
+      const prodCode     = family?.production_code || "—"
       return `
       <tr>
         <td>${i + 1}</td>
@@ -2036,6 +2052,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <td dir="auto">${o.textileName || "—"}</td>
         <td dir="auto">${pattern}</td>
         <td dir="auto">${weave}</td>
+        <td style="font-weight:700;color:#1a1a1a">${prodCode}</td>
+        <td style="font-weight:700;color:#534AB7">${colorCodePart}</td>
         <td>${o.quantity}m</td>
         <td>${o.orderDate || "—"}</td>
         <td dir="auto">${o.store || "—"}</td>
@@ -2124,6 +2142,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <th>Name</th>
         <th>Pattern</th>
         <th>Weave</th>
+        <th>Prod. code (كود الرسم)</th>
+        <th>Color code</th>
         <th>Quantity</th>
         <th>Order date</th>
         <th>Branch</th>
@@ -4304,6 +4324,109 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                   </div>
                 ))}
               </div>
+            </div>
+
+            {/* ── PRODUCTION CODES PANEL ──────────────────── */}
+            <div style={S.card}>
+              <div style={S.cHead} className="dtx-chead">
+                <span style={S.cTitle}>🏭 Production codes (كود الرسم)</span>
+                <span style={S.cSub}>{textileFamilies.length} design families</span>
+                <button style={{...S.btnSm,marginLeft:"auto",fontSize:12}}
+                  onClick={()=>setShowFamilies(v=>!v)}>
+                  {showFamilies?"▲ Hide":"▼ Show"}
+                </button>
+              </div>
+              {showFamilies&&(
+                <div style={S.cBody}>
+                  {/* Add new family row */}
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 2fr 1fr auto",gap:8,marginBottom:16,alignItems:"center"}}>
+                    <input style={S.input} placeholder="Base code (e.g. 1138)" dir="auto"
+                      value={newFam.base_code} onChange={e=>setNewFam(p=>({...p,base_code:e.target.value}))}/>
+                    <input style={S.input} placeholder="Design name (e.g. مونتانا)" dir="auto"
+                      value={newFam.name} onChange={e=>setNewFam(p=>({...p,name:e.target.value}))}/>
+                    <input style={S.input} placeholder="Production code (e.g. 16547)"
+                      value={newFam.production_code} onChange={e=>setNewFam(p=>({...p,production_code:e.target.value}))}/>
+                    <button style={S.btnPrimary} onClick={async()=>{
+                      if(!newFam.base_code.trim()||!newFam.production_code.trim()) return
+                      const fam:TextileFamily={
+                        base_code:newFam.base_code.trim(),
+                        name:newFam.name.trim(),
+                        production_code:newFam.production_code.trim()
+                      }
+                      await dbUpsert("textile_families", fam as unknown as Record<string,unknown>)
+                      setTextileFamilies(p=>[...p.filter(f=>f.base_code!==fam.base_code),fam].sort((a,b)=>a.base_code.localeCompare(b.base_code)))
+                      setNewFam({base_code:"",name:"",production_code:""})
+                    }}>+ Add</button>
+                  </div>
+
+                  {textileFamilies.length===0&&(
+                    <div style={S.empty}>No production codes yet. Add your first one above.</div>
+                  )}
+
+                  {textileFamilies.length>0&&(
+                    <div style={{border:"0.5px solid #e5e5e5",borderRadius:8,overflow:"hidden"}}>
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                        <thead>
+                          <tr style={{background:"#f5f5f5"}}>
+                            {["Base code","Design name","Production code (كود الرسم)",""].map(h=>(
+                              <th key={h} style={{padding:"8px 12px",textAlign:"right",fontWeight:500,color:"#555",fontSize:12}}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {textileFamilies.sort((a,b)=>a.base_code.localeCompare(b.base_code)).map((f,i)=>(
+                            <tr key={f.base_code} style={{borderBottom:"0.5px solid #f5f5f5",background:i%2===0?"transparent":"#fafafa"}}>
+                              {editFam?.base_code===f.base_code?(
+                                <>
+                                  <td style={{padding:"6px 12px",fontWeight:600}}>{f.base_code}</td>
+                                  <td style={{padding:"4px 8px"}}>
+                                    <input style={{...S.input,fontSize:12}} dir="auto" value={editFam.name}
+                                      onChange={e=>setEditFam(p=>p?{...p,name:e.target.value}:p)}/>
+                                  </td>
+                                  <td style={{padding:"4px 8px"}}>
+                                    <input style={{...S.input,fontSize:12}} value={editFam.production_code}
+                                      onChange={e=>setEditFam(p=>p?{...p,production_code:e.target.value}:p)}/>
+                                  </td>
+                                  <td style={{padding:"4px 8px"}}>
+                                    <div style={{display:"flex",gap:6}}>
+                                      <button style={{...S.btnPrimary,fontSize:11,padding:"4px 10px"}} onClick={async()=>{
+                                        if(!editFam) return
+                                        await dbUpsert("textile_families", editFam as unknown as Record<string,unknown>)
+                                        setTextileFamilies(p=>p.map(x=>x.base_code===editFam.base_code?editFam:x))
+                                        setEditFam(null)
+                                      }}>Save</button>
+                                      <button style={{...S.btnSm,fontSize:11,padding:"4px 10px"}} onClick={()=>setEditFam(null)}>Cancel</button>
+                                    </div>
+                                  </td>
+                                </>
+                              ):(
+                                <>
+                                  <td style={{padding:"8px 12px",fontWeight:600,fontFamily:"monospace"}}>{f.base_code}</td>
+                                  <td style={{padding:"8px 12px"}} dir="auto">{f.name||"—"}</td>
+                                  <td style={{padding:"8px 12px",fontWeight:600,color:"#534AB7",fontFamily:"monospace"}}>{f.production_code}</td>
+                                  <td style={{padding:"8px 12px"}}>
+                                    <div style={{display:"flex",gap:6}}>
+                                      <button style={S.btnIcon} onClick={()=>setEditFam({...f})}>✏️</button>
+                                      <button style={S.btnIcon} onClick={async()=>{
+                                        if(!window.confirm(`Delete production code for ${f.base_code}?`)) return
+                                        await fetch(`${import.meta.env.VITE_SUPABASE_URL}/rest/v1/textile_families?base_code=eq.${f.base_code}`,{
+                                          method:"DELETE",
+                                          headers:{"apikey":import.meta.env.VITE_SUPABASE_ANON_KEY,"Authorization":`Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`}
+                                        })
+                                        setTextileFamilies(p=>p.filter(x=>x.base_code!==f.base_code))
+                                      }}>🗑</button>
+                                    </div>
+                                  </td>
+                                </>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
