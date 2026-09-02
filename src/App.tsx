@@ -2042,7 +2042,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       const pattern      = textile?.pattern || "—"
       const weave        = textile?.weave   || "—"
       const baseCode     = o.textileCode.split("/")[0]
-      const colorCodePart= o.textileCode.split("/")[2] || "—"
       const family       = textileFamilies.find(f => f.base_code === baseCode)
       const prodCode     = family?.production_code || "—"
       return `
@@ -2053,7 +2052,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <td dir="auto">${pattern}</td>
         <td dir="auto">${weave}</td>
         <td style="font-weight:700;color:#1a1a1a">${prodCode}</td>
-        <td style="font-weight:700;color:#534AB7">${colorCodePart}</td>
         <td>${o.quantity}m</td>
         <td>${o.orderDate || "—"}</td>
         <td dir="auto">${o.store || "—"}</td>
@@ -2143,7 +2141,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <th>Pattern</th>
         <th>Weave</th>
         <th>Prod. code (كود الرسم)</th>
-        <th>Color code</th>
         <th>Quantity</th>
         <th>Order date</th>
         <th>Branch</th>
