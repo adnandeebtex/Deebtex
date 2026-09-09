@@ -606,11 +606,12 @@ function buildSchedule(orders: Order[], machines: Machine[]) {
       return PRI[b.priority] - PRI[a.priority]
     })
 
-  // Machine category priority — when no same-warp exists, prefer higher-capability machines
-  // Electronic > Mechanical for the same fabric (electronic machines handle more order types)
+  // Machine category priority — Electronic machines equal priority, Mechanical lower
+  // Electronic Double = Electronic 4 (anything on Double can run on 4)
+  // Tiebreaker between equal-priority machines is load (least loaded wins)
   const MACHINE_PRIORITY: Record<MachineCategory, number> = {
     "Electronic Double":     4,
-    "Electronic 4":          3,
+    "Electronic 4":          4,
     "Mechanical Double 280": 2,
     "Mechanical Double 140": 2,
     "Mechanical 4":          1,
