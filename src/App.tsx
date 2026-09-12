@@ -2642,11 +2642,13 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                       const date = new Date().toLocaleDateString("en-GB")
                       const activeOrds = orders.filter(o=>o.warpStatus!=="done").sort((a,b)=>orderLabel(a).localeCompare(orderLabel(b)))
                       const rows = activeOrds.map((o,i)=>{
+                        const tex = textiles.find(t=>t.code===o.textileCode)
                         return `<tr>
                           <td>${i+1}</td>
                           <td dir="auto" style="font-weight:600">${o.textileCode}</td>
                           <td dir="auto">${o.textileName||"—"}</td>
-                          <td dir="auto">${o.color||"—"}</td>
+                          <td dir="auto">${tex?.pattern||"—"}</td>
+                          <td dir="auto">${tex?.weave||"—"}</td>
                           <td style="font-weight:600;color:#534AB7">${o.quantity}m</td>
                           <td>${o.orderDate||"—"}</td>
                           <td dir="auto">${o.store||"—"}</td>
@@ -2707,7 +2709,8 @@ tr:hover td{background:#F3F2FD}
       <th style="width:28px">#</th>
       <th>Code</th>
       <th>Name</th>
-      <th>Color</th>
+      <th>Pattern</th>
+      <th>Weave</th>
       <th>Qty</th>
       <th>Order date</th>
       <th>Store</th>
