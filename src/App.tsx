@@ -2642,9 +2642,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                       const date = new Date().toLocaleDateString("en-GB")
                       const activeOrds = orders.filter(o=>o.warpStatus!=="done").sort((a,b)=>orderLabel(a).localeCompare(orderLabel(b)))
                       const rows = activeOrds.map((o,i)=>{
-                        const warn = dlWarn(o.deadline)
-                        const deadlineColor = warn==="urgent"?"#E24B4A":warn==="soon"?"#BA7517":"#555"
-                        const assignedMachine = machines.find(m=>(schedule[m.id]??[]).some(x=>x.id===o.id))
                         return `<tr>
                           <td>${i+1}</td>
                           <td dir="auto" style="font-weight:600">${o.textileCode}</td>
@@ -2652,11 +2649,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                           <td dir="auto">${o.color||"—"}</td>
                           <td style="font-weight:600;color:#534AB7">${o.quantity}m</td>
                           <td>${o.orderDate||"—"}</td>
-                          <td style="color:${deadlineColor};font-weight:${warn?600:400}">${o.deadline||"—"}${warn==="urgent"?" ⚠":""}${warn==="soon"?" !":""}</td>
                           <td dir="auto">${o.store||"—"}</td>
                           <td style="font-size:11px">${o.orderNumber||"—"}</td>
-                          <td style="font-size:11px;color:#666">${assignedMachine?.name||"—"}</td>
-                          <td><span style="padding:2px 7px;border-radius:20px;font-size:10px;font-weight:600;background:${o.priority==="High"?"#FEEBEB":o.priority==="Low"?"#f0fdf4":"#f5f5f5"};color:${o.priority==="High"?"#A32D2D":o.priority==="Low"?"#166534":"#555"}">${o.priority}</span></td>
                         </tr>`
                       }).join("")
                       const html=`<!DOCTYPE html>
@@ -2716,11 +2710,8 @@ tr:hover td{background:#F3F2FD}
       <th>Color</th>
       <th>Qty</th>
       <th>Order date</th>
-      <th>Due date</th>
       <th>Store</th>
       <th>Order no.</th>
-      <th>Machine</th>
-      <th>Priority</th>
     </tr></thead>
     <tbody>${rows}</tbody>
   </table>
