@@ -2636,6 +2636,109 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                       border:orderSort==="deadline"?"none":"0.5px solid #d5d5d5"}}>
                     📅 Deadline
                   </button>
+                  <button
+                    style={{...S.btnSm,fontSize:11,padding:"3px 10px"}}
+                    onClick={()=>{
+                      const date = new Date().toLocaleDateString("en-GB")
+                      const activeOrds = orders.filter(o=>o.warpStatus!=="done").sort((a,b)=>orderLabel(a).localeCompare(orderLabel(b)))
+                      const rows = activeOrds.map((o,i)=>{
+                        const warn = dlWarn(o.deadline)
+                        const deadlineColor = warn==="urgent"?"#E24B4A":warn==="soon"?"#BA7517":"#555"
+                        const assignedMachine = machines.find(m=>(schedule[m.id]??[]).some(x=>x.id===o.id))
+                        return `<tr>
+                          <td>${i+1}</td>
+                          <td dir="auto" style="font-weight:600">${o.textileCode}</td>
+                          <td dir="auto">${o.textileName||"—"}</td>
+                          <td dir="auto">${o.color||"—"}</td>
+                          <td style="font-weight:600;color:#534AB7">${o.quantity}m</td>
+                          <td>${o.orderDate||"—"}</td>
+                          <td style="color:${deadlineColor};font-weight:${warn?600:400}">${o.deadline||"—"}${warn==="urgent"?" ⚠":""}${warn==="soon"?" !":""}</td>
+                          <td dir="auto">${o.store||"—"}</td>
+                          <td style="font-size:11px">${o.orderNumber||"—"}</td>
+                          <td style="font-size:11px;color:#666">${assignedMachine?.name||"—"}</td>
+                          <td><span style="padding:2px 7px;border-radius:20px;font-size:10px;font-weight:600;background:${o.priority==="High"?"#FEEBEB":o.priority==="Low"?"#f0fdf4":"#f5f5f5"};color:${o.priority==="High"?"#A32D2D":o.priority==="Low"?"#166534":"#555"}">${o.priority}</span></td>
+                        </tr>`
+                      }).join("")
+                      const html=`<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"/>
+<title>Active Orders — Deebtex ${date}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;padding:24px;font-size:12px;color:#111}
+.topbar{position:fixed;top:0;left:0;right:0;background:#534AB7;color:#fff;padding:8px 20px;display:flex;align-items:center;gap:12px;z-index:999}
+.topbar button{background:#fff;color:#534AB7;border:none;padding:5px 14px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer}
+.content{margin-top:48px}
+.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;padding-bottom:12px;border-bottom:2px solid #534AB7}
+.brand{font-size:20px;font-weight:700;color:#534AB7}
+.meta{font-size:11px;color:#888;text-align:right;line-height:1.8}
+.summary{display:flex;gap:24px;margin-bottom:16px;padding:10px 14px;background:#F3F2FD;border-radius:8px;font-size:12px}
+.summary span{color:#534AB7;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{background:#534AB7;color:#fff;padding:7px 8px;text-align:right;font-weight:500;position:sticky;top:0}
+td{padding:6px 8px;border-bottom:0.5px solid #f0f0f0;vertical-align:middle}
+tr:nth-child(even) td{background:#fafafa}
+tr:hover td{background:#F3F2FD}
+.footer{margin-top:16px;font-size:10px;color:#aaa;display:flex;justify-content:space-between;border-top:0.5px solid #e5e5e5;padding-top:8px}
+@media print{.topbar{display:none}.content{margin-top:0}body{padding:12px}th{background:#534AB7 !important;-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span style="font-weight:600">🖨 Active Orders — Deebtex</span>
+  <button onclick="window.print()">🖨 Print</button>
+</div>
+<div class="content">
+  <div class="header">
+    <div>
+      <div class="brand">Deebtex</div>
+      <div style="font-size:11px;color:#888;margin-top:2px">Active Orders Report</div>
+    </div>
+    <div class="meta">
+      <div>Printed: ${date}</div>
+      <div>Total active orders: <strong>${activeOrds.length}</strong></div>
+    </div>
+  </div>
+  <div class="summary">
+    <div>Total orders: <span>${activeOrds.length}</span></div>
+    <div>Total meters: <span>${activeOrds.reduce((s,o)=>s+o.quantity,0).toLocaleString()}m</span></div>
+    <div>High priority: <span style="color:#A32D2D">${activeOrds.filter(o=>o.priority==="High").length}</span></div>
+    <div>Overdue: <span style="color:#A32D2D">${activeOrds.filter(o=>o.deadline&&new Date(o.deadline)<new Date()).length}</span></div>
+    <div>Not started: <span>${activeOrds.filter(o=>o.warpStatus==="not-started").length}</span></div>
+    <div>On machine: <span style="color:#166534">${activeOrds.filter(o=>o.warpStatus==="on-machine").length}</span></div>
+  </div>
+  <table>
+    <thead><tr>
+      <th style="width:28px">#</th>
+      <th>Code</th>
+      <th>Name</th>
+      <th>Color</th>
+      <th>Qty</th>
+      <th>Order date</th>
+      <th>Due date</th>
+      <th>Store</th>
+      <th>Order no.</th>
+      <th>Machine</th>
+      <th>Priority</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  <div class="footer">
+    <span>Deebtex Factory Management System</span>
+    <span>${activeOrds.length} active orders · printed ${date}</span>
+  </div>
+</div>
+</body>
+</html>`
+                      const win=window.open("","_blank")
+                      if(!win)return
+                      win.document.write(html)
+                      win.document.close()
+                      win.focus()
+                    }}>
+                    🖨 Print all
+                  </button>
                 </div>
               </div>
               {search && (
