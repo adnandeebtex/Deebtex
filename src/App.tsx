@@ -1337,6 +1337,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     })
   }
   const [orderSort,   setOrderSort]   = useState<"name" | "deadline">("name")
+  const [storeFilter, setStoreFilter] = useState<string>("")
   const [textileSearch, setTextileSearch] = useState("")
   const [textileSort,   setTextileSort]   = useState<"name" | "fabricType">("name")
 
@@ -1482,7 +1483,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   }, [orders, machines, ready])
 
   const filteredOrders = useMemo(() => {
-    const active = orders.filter(o => o.warpStatus !== "done")
+    let active = orders.filter(o => o.warpStatus !== "done")
+    if (storeFilter) active = active.filter(o => o.store === storeFilter)
     const q = search.toLowerCase().trim()
     const filtered = q
       ? active.filter(o =>
@@ -1501,7 +1503,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       }
       return a.textileCode.localeCompare(b.textileCode, "ar")
     })
-  }, [orders, search, orderSort])
+  }, [orders, search, orderSort, storeFilter])
 
   const filteredTextiles = useMemo(() => {
     const q = textileSearch.toLowerCase().trim()
@@ -2324,6 +2326,17 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             <span style={{position:"absolute",left:9,fontSize:12,pointerEvents:"none"}}>🔍</span>
             <input style={S.search} placeholder="Search orders…" value={search} onChange={e=>setSearch(e.target.value)}/>
           </div>
+          {view==="orders"&&(
+            <select
+              value={storeFilter}
+              onChange={e=>setStoreFilter(e.target.value)}
+              style={{padding:"6px 10px",borderRadius:8,border:"0.5px solid #d5d5d5",fontSize:12,
+                background:storeFilter?"#F3F2FD":"#fff",color:storeFilter?"#534AB7":"#555",
+                fontWeight:storeFilter?600:400,cursor:"pointer",minWidth:120}}>
+              <option value="">All stores</option>
+              {STORES.map(s=><option key={s} value={s}>{s}</option>)}
+            </select>
+          )}
           {/* hidden file input for restore */}
           <input id="restore-input" type="file" accept=".json" style={{display:"none"}}
             onChange={e=>{ if(e.target.files?.[0]) importBackup(e.target.files[0]); e.target.value="" }}/>
