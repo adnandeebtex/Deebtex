@@ -3966,10 +3966,13 @@ tr:hover td{background:#F3F2FD}
               const tex = texMap[appCode]||null
               const status:ImportRow["status"] = !tex?"no-textile":isDup?"duplicate":"new"
 
+              const rawStore = String(row[2]||"").trim()
+              const store = rawStore.replace(/[0-9]/g, d=>'٠١٢٣٤٥٦٧٨٩'[parseInt(d)])
+
               rows.push({
                 appCode, textileName:tex?tex.name:String(row[18]||"").trim(),
                 qty, ordered, due, orderNum:on,
-                store:String(row[2]||"").trim(), status, tex
+                store, status, tex
               })
             }
             return rows
