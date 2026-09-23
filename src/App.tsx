@@ -4022,18 +4022,49 @@ tr:hover td{background:#F3F2FD}
           const nNew  = importRows.filter(r=>r.status==="new").length
           const nDup  = importRows.filter(r=>r.status==="duplicate").length
           const nNoTex= importRows.filter(r=>r.status==="no-textile").length
-          const pdfKeysFull=new Set(importRows.map(r=>`${r.appCode}||${r.ordered}||${r.qty}||${r.orderNum}`))
-          const pdfKeysBase=new Set(importRows.map(r=>`${r.appCode}||${r.ordered}||${r.qty}`))
+          // Count how many times each key appears in the Excel
+          const excelCountFull = new Map<string,number>()
+          const excelCountBase = new Map<string,number>()
+          for(const r of importRows){
+            const full=`${r.appCode}||${r.ordered}||${r.qty}||${r.orderNum}`
+            const base=`${r.appCode}||${r.ordered}||${r.qty}`
+            excelCountFull.set(full,(excelCountFull.get(full)||0)+1)
+            excelCountBase.set(base,(excelCountBase.get(base)||0)+1)
+          }
+
+          // Count how many times each key appears in the app (active only)
+          const appCountFull = new Map<string,number>()
+          const appCountBase = new Map<string,number>()
+          for(const o of orders.filter(o=>o.warpStatus!=="done")){
+            const full=`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`
+            const base=`${o.textileCode}||${o.orderDate||""}||${o.quantity}`
+            appCountFull.set(full,(appCountFull.get(full)||0)+1)
+            appCountBase.set(base,(appCountBase.get(base)||0)+1)
+          }
+
           const possiblyDone=(importStatus==="preview"||importStatus==="done")
-            ?orders.filter(o=>{
-              if(o.warpStatus==="done") return false
-              const full=`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`
-              const base=`${o.textileCode}||${o.orderDate||""}||${o.quantity}`
-              // An order is "possibly done" only if it doesn't appear in the PDF at all
-              // If it has an order number, check full key; otherwise check base key
-              if(o.orderNumber) return !pdfKeysFull.has(full)
-              return !pdfKeysBase.has(base)
-            })
+            ?(()=>{
+              // Track how many of each key we've already "matched" to Excel
+              const matchedFull = new Map<string,number>()
+              const matchedBase = new Map<string,number>()
+              const result:Order[]=[]
+              for(const o of orders.filter(o=>o.warpStatus!=="done")){
+                const full=`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`
+                const base=`${o.textileCode}||${o.orderDate||""}||${o.quantity}`
+                if(o.orderNumber){
+                  const excelCount=excelCountFull.get(full)||0
+                  const matched=matchedFull.get(full)||0
+                  if(matched>=excelCount) result.push(o)
+                  else matchedFull.set(full,matched+1)
+                } else {
+                  const excelCount=excelCountBase.get(base)||0
+                  const matched=matchedBase.get(base)||0
+                  if(matched>=excelCount) result.push(o)
+                  else matchedBase.set(base,matched+1)
+                }
+              }
+              return result
+            })()
             :[]
 
           return (
