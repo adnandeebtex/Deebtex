@@ -3999,9 +3999,22 @@ tr:hover td{background:#F3F2FD}
             const sel=[...importSelected].map(i=>importRows[i]).filter(r=>r.status==="new"&&r.tex)
             if(!sel.length)return
             setImportStatus("importing")
+            setImportSelected(new Set()) // clear selection immediately to prevent double-click
             const log:string[]=[]
+            let skipped=0
             for(let i=0;i<sel.length;i++){
               const r=sel[i]; const t=r.tex!
+
+              // Final safety check: verify this exact order doesn't already exist
+              // (guards against double-click or network retry)
+              const alreadyExists=orders.some(o=>
+                o.textileCode===r.appCode &&
+                o.orderDate===r.ordered &&
+                o.quantity===r.qty &&
+                (o.orderNumber||"")===(r.orderNum||"")
+              )
+              if(alreadyExists){ skipped++; continue }
+
               const newOrder:Order={
                 id:Date.now()+i, textileCode:r.appCode, textileName:t.name,
                 color:t.color, fabricType:t.fabricType, quantity:r.qty,
@@ -4016,7 +4029,7 @@ tr:hover td{background:#F3F2FD}
               setImportLog([...log])
             }
             setImportStatus("done")
-            setImportLog([...log,"",`✅ Done: ${sel.length} orders imported`])
+            setImportLog([...log,"",`✅ Done: ${sel.length-skipped} orders imported${skipped?` · ${skipped} skipped (already existed)`:""}`])
           }
 
           const nNew  = importRows.filter(r=>r.status==="new").length
