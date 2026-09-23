@@ -375,7 +375,7 @@ function sanitizeOrder(row: Record<string, unknown>): Order {
     notes:             String(row.notes ?? ""),
     orderNumber:       row.orderNumber ? String(row.orderNumber) : undefined,
     orderDate:         row.orderDate   ? String(row.orderDate)   : undefined,
-    store:             row.store       ? String(row.store)       : undefined,
+    store:             row.store       ? normStore(String(row.store)) : undefined,
     forcedMachineId:   row.forcedMachineId != null ? Number(row.forcedMachineId) : undefined,
     warpClosed:        row.warpClosed === true,
     completedAt:       row.completedAt ? String(row.completedAt) : undefined,
@@ -525,6 +525,14 @@ function machineWarpKey(o: Order, machineId: number) {
   return `${warpKey(o)}||m${machineId}`
 }
 function calcWarp(q: number) { return Math.ceil(q * 1.1) }
+// Store names: always use Arabic digits (دمياط 2 / دمياط ۲ → دمياط ٢) and single spaces
+function normStore(s?: string): string {
+  return (s ?? "")
+    .replace(/[0-9]/g, d => "٠١٢٣٤٥٦٧٨٩"[+d])
+    .replace(/[\u06F0-\u06F9]/g, d => "٠١٢٣٤٥٦٧٨٩"[d.charCodeAt(0) - 0x06F0])
+    .replace(/\s+/g, " ")
+    .trim()
+}
 function machineLoad(sch: Record<number,Order[]>, id: number) {
   return sch[id]?.reduce((s,o) => s + o.quantity, 0) ?? 0
 }
@@ -1664,7 +1672,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       machineCategories:oCats, warpStatus:editO?.warpStatus??"not-started", notes:oNotes,
       orderNumber: oOrderNum.trim() || undefined,
       orderDate:   oOrderDate || undefined,
-      store:       oStore || undefined,
+      store:       normStore(oStore) || undefined,
     }
     if (editO) {
       setOrders(p => p.map(o => o.id===editO.id ? data : o))
@@ -2058,6 +2066,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <td>${o.quantity}m</td>
         <td>${o.orderDate || "—"}</td>
         <td dir="auto">${o.store || "—"}</td>
+        <td style="font-weight:600">${o.orderNumber || "—"}</td>
       </tr>
     `}).join("")
 
@@ -2147,6 +2156,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         <th>Quantity</th>
         <th>Order date</th>
         <th>Branch</th>
+        <th>Order no.</th>
       </tr>
     </thead>
     <tbody>${rows}</tbody>
@@ -3967,7 +3977,7 @@ tr:hover td{background:#F3F2FD}
               const status:ImportRow["status"] = !tex?"no-textile":isDup?"duplicate":"new"
 
               const rawStore = String(row[2]||"").trim()
-              const store = rawStore.replace(/[0-9]/g, d=>'٠١٢٣٤٥٦٧٨٩'[parseInt(d)])
+              const store = normStore(rawStore)
 
               rows.push({
                 appCode, textileName:tex?tex.name:String(row[18]||"").trim(),
