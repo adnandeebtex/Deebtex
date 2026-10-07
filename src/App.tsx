@@ -2953,6 +2953,25 @@ tr:hover td{background:#F3F2FD}
           const months = Object.keys(monthCount).sort().slice(-12)   // last 12 months
           const maxMonthVal = Math.max(...months.map(m=>Math.max(monthCount[m].received,monthCount[m].completed)),1)
 
+          // ── METERS PER MONTH (ordered vs produced) ────────
+          const monthMeters: Record<string,{ordered:number;produced:number}> = {}
+          for (const o of allOrders) {
+            const d = o.orderDate || o.deadline
+            if (!d) continue
+            const key = d.slice(0,7)
+            if (!monthMeters[key]) monthMeters[key] = {ordered:0,produced:0}
+            monthMeters[key].ordered += o.quantity
+          }
+          for (const o of doneOrders) {
+            const d = o.completedAt
+            if (!d) continue
+            const key = d.slice(0,7)
+            if (!monthMeters[key]) monthMeters[key] = {ordered:0,produced:0}
+            monthMeters[key].produced += o.quantity
+          }
+          const meterMonths = Object.keys(monthMeters).sort().slice(-12)
+          const maxMeterVal = Math.max(...meterMonths.map(m=>Math.max(monthMeters[m].ordered,monthMeters[m].produced)),1)
+
           // ── STOCK VELOCITY ────────────────────────────────
           // threads: sum of OUT entries in last 30 days
           const now30 = Date.now() - 30*86400000
@@ -3054,6 +3073,39 @@ tr:hover td{background:#F3F2FD}
                   </div>
                 </div>
 
+
+                {/* ── METERS PER MONTH ──────────────────────── */}
+                <div style={S.card}>
+                  <div style={S.cHead} className="dtx-chead">
+                    <span style={S.cTitle}>Monthly meters</span>
+                    <span style={S.cSub}>last 12 months</span>
+                  </div>
+                  <div style={S.cBody}>
+                    {meterMonths.length===0&&<div style={S.empty}>Add order dates to see monthly meters.</div>}
+                    {meterMonths.map(m=>{
+                      const {ordered,produced} = monthMeters[m]
+                      const label = new Date(m+"-01").toLocaleDateString("en-GB",{month:"short",year:"2-digit"})
+                      return (
+                        <div key={m} style={{marginBottom:10}}>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}>
+                            <span style={{color:"#555",fontWeight:500}}>{label}</span>
+                            <span style={{color:"#aaa"}}>{Math.round(ordered).toLocaleString()}m ordered · {Math.round(produced).toLocaleString()}m produced</span>
+                          </div>
+                          <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                            <Bar pct={Math.round(ordered/maxMeterVal*100)} color="#7F77DD" h={5}/>
+                            <Bar pct={Math.round(produced/maxMeterVal*100)} color="#639922" h={5}/>
+                          </div>
+                        </div>
+                      )
+                    })}
+                    {meterMonths.length>0&&(
+                      <div style={{display:"flex",gap:16,marginTop:8,fontSize:11}}>
+                        <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:5,background:"#7F77DD",borderRadius:2,display:"inline-block"}}/>Ordered</span>
+                        <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:10,height:5,background:"#639922",borderRadius:2,display:"inline-block"}}/>Produced</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
 
                 {/* ── TOP COLORS ────────────────────────────── */}
                 <div style={S.card}>
