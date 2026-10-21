@@ -315,6 +315,8 @@ type Order   = {
   warpClosed?: boolean
   warpGroupId?: string
   completedAt?: string
+  fromStockM?: number      // meters taken from finished stock (not woven)
+  threadDeducted?: boolean // thread already deducted for this order
 }
 // A saved textile definition
 type Textile = {
@@ -327,7 +329,9 @@ type Textile = {
   weave: string       // e.g. "ساتان", "تويل"
   machineCategories: MachineCategory[]
   notes: string
+  threadRecipe: RecipeLine[]   // threads used, kg per meter of fabric
 }
+type RecipeLine = { threadId: number; kgPerM: number }
 
 const CATS: MachineCategory[] = [
   "Electronic Double","Electronic 4","Mechanical 4",
@@ -379,6 +383,8 @@ function sanitizeOrder(row: Record<string, unknown>): Order {
     forcedMachineId:   row.forcedMachineId != null ? Number(row.forcedMachineId) : undefined,
     warpClosed:        row.warpClosed === true,
     completedAt:       row.completedAt ? String(row.completedAt) : undefined,
+    fromStockM:        row.fromStockM != null ? Number(row.fromStockM) : undefined,
+    threadDeducted:    row.threadDeducted === true,
   }
 }
 
@@ -440,8 +446,23 @@ function sanitizeTextile(row: Record<string, unknown>): Textile {
     weave:             String(row.weave ?? ""),
     machineCategories: (row.machineCategories as MachineCategory[]) ?? [],
     notes:             String(row.notes ?? ""),
+    threadRecipe:      parseRecipe(row.threadRecipe),
   }
 }
+function parseRecipe(v: unknown): RecipeLine[] {
+  try {
+    const arr = typeof v === "string" ? JSON.parse(v) : v
+    if (!Array.isArray(arr)) return []
+    return arr
+      .map(x => ({ threadId: Number((x as RecipeLine).threadId), kgPerM: Number((x as RecipeLine).kgPerM) }))
+      .filter(x => x.threadId && x.kgPerM > 0)
+  } catch { return [] }
+}
+// meters the store ordered (woven + taken from stock) — used for import matching & demand analytics
+function ordQ(o: Order) { return o.quantity + (o.fromStockM ?? 0) }
+// unique ids even when many rows are created in the same millisecond
+let _idSeq = 0
+function newId() { _idSeq = (_idSeq + 1) % 1000; return Date.now() * 1000 + _idSeq }
 
 async function dbLoadOrders(): Promise<Order[]> {
   const rows = await dbLoadRaw<Record<string, unknown>>("orders")
@@ -1157,7 +1178,11 @@ type TFProps = {
   categories:MachineCategory[]; notes:string; isEdit:boolean
   knownColors: string[]
   knownFabrics: string[]
+  recipe: RecipeLine[]
+  threads: Thread[]
+  textiles: Textile[]
   set: {
+    recipe:(v:RecipeLine[])=>void
     code:(v:string)=>void; name:(v:string)=>void
     color:(v:string)=>void; fabricType:(v:string)=>void
     pattern:(v:string)=>void; weave:(v:string)=>void
@@ -1166,7 +1191,8 @@ type TFProps = {
   onSave:()=>void
 }
 
-function TextileFormUI({ code,name,color,fabricType,pattern,weave,categories,notes,isEdit,knownColors,knownFabrics,set,onSave }: TFProps) {
+function TextileFormUI({ code,name,color,fabricType,pattern,weave,categories,notes,isEdit,knownColors,knownFabrics,recipe,threads,textiles,set,onSave }: TFProps) {
+  const copySources = textiles.filter(t => t.threadRecipe.length > 0 && t.code !== code)
   function toggleCat(cat: MachineCategory) {
     set.categories(categories.includes(cat) ? categories.filter(c=>c!==cat) : [...categories,cat])
   }
@@ -1217,6 +1243,37 @@ function TextileFormUI({ code,name,color,fabricType,pattern,weave,categories,not
         </div>
         {categories.length===0&&<div style={{fontSize:11,color:"#E24B4A",marginTop:5}}>Pick at least one machine type.</div>}
       </Field>
+      <Field label="Threads used (kg per meter of fabric)">
+        <div style={{ padding:"10px 12px", border:"0.5px solid #d5d5d5", borderRadius:8, background:"#fafafa" }}>
+          {threads.length===0 && <div style={{fontSize:12,color:"#aaa"}}>Add threads in the Threads tab first.</div>}
+          {recipe.map((line,i)=>(
+            <div key={i} style={{display:"flex",gap:6,alignItems:"center",marginBottom:6}}>
+              <select style={{...S.input,flex:2}} value={line.threadId||""}
+                onChange={e=>set.recipe(recipe.map((l,j)=>j===i?{...l,threadId:Number(e.target.value)}:l))}>
+                <option value="">— pick thread —</option>
+                {threads.map(t=><option key={t.id} value={t.id}>{t.code}{t.name?" — "+t.name:""}{t.color?" · "+t.color:""}</option>)}
+              </select>
+              <input style={{...S.input,flex:1}} type="number" step="0.001" min="0" placeholder="kg / m"
+                value={line.kgPerM||""}
+                onChange={e=>set.recipe(recipe.map((l,j)=>j===i?{...l,kgPerM:Number(e.target.value)}:l))}/>
+              <button style={{...S.btnIcon,color:"#E24B4A"}} title="Remove"
+                onClick={()=>set.recipe(recipe.filter((_,j)=>j!==i))}>✕</button>
+            </div>
+          ))}
+          {threads.length>0 && (
+            <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+              <button style={{...S.btnSm,fontSize:11}} onClick={()=>set.recipe([...recipe,{threadId:0,kgPerM:0}])}>+ Add thread</button>
+              {copySources.length>0 && (
+                <select style={{...S.input,width:"auto",fontSize:11,padding:"4px 8px"}} value=""
+                  onChange={e=>{ const src=textiles.find(t=>t.id===Number(e.target.value)); if(src) set.recipe(src.threadRecipe.map(l=>({...l}))) }}>
+                  <option value="">Copy from another textile…</option>
+                  {copySources.map(t=><option key={t.id} value={t.id}>{t.code}{t.name?" — "+t.name:""}</option>)}
+                </select>
+              )}
+            </div>
+          )}
+        </div>
+      </Field>
       <Field label="Notes (optional)">
         <textarea style={{...S.input,height:52,resize:"vertical"} as CSSProperties}
           value={notes} onChange={e=>set.notes(e.target.value)} placeholder="Any special notes…" />
@@ -1251,8 +1308,6 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
   // warp done deduction modal
   const [warpDoneGroup, setWarpDoneGroup] = useState<{orderIds:number[];label:string;machine:string;meters:number}|null>(null)
-  const [warpDoneThreadId, setWarpDoneThreadId] = useState<number|null>(null)
-  const [warpDoneKg, setWarpDoneKg] = useState("")
 
   // machine form state
   const [mName, setMName] = useState("")
@@ -1268,6 +1323,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [tNotes, setTNotes] = useState("")
   const [tPattern,setTPattern]= useState("")
   const [tWeave,  setTWeave]  = useState("")
+  const [tRecipe, setTRecipe] = useState<RecipeLine[]>([])
+  // fulfil-from-stock modal
+  const [stockFulfil, setStockFulfil] = useState<Order|null>(null)
+  const [stockUseM,   setStockUseM]   = useState("")
 
   // thread form state
   const [thCode,  setThCode]  = useState("")
@@ -1379,7 +1438,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       ])
       const [recoveredO, recoveredT] = await Promise.all([
         recoverFromBackup("orders",   "dtx_orders",   o, sanitizeOrder),
-        recoverFromBackup("textiles", "dtx_textiles", t, r => r as Textile),
+        recoverFromBackup("textiles", "dtx_textiles", t, sanitizeTextile),
       ])
       setMachines(m); setOrders(recoveredO); setTextiles(recoveredT)
       setThreads(th); setStockLog(sl); setTextileStock(ts)
@@ -1445,12 +1504,12 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       // ── TEXTILES ──
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "textiles" },
         (payload) => {
-          const t = payload.new as Textile
+          const t = sanitizeTextile(payload.new as Record<string, unknown>)
           setTextiles(p => p.some(x => x.id === t.id) ? p : [...p, t])
         })
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "textiles" },
         (payload) => {
-          const t = payload.new as Textile
+          const t = sanitizeTextile(payload.new as Record<string, unknown>)
           setTextiles(p => p.map(x => x.id === t.id ? t : x))
         })
       .on("postgres_changes", { event: "DELETE", schema: "public", table: "textiles" },
@@ -1602,13 +1661,14 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   }
 
   // textile actions
-  function resetTF() { setTCode(""); setTName(""); setTColor(""); setTFab(""); setTCats([]); setTNotes(""); setTPattern(""); setTWeave("") }
+  function resetTF() { setTCode(""); setTName(""); setTColor(""); setTFab(""); setTCats([]); setTNotes(""); setTPattern(""); setTWeave(""); setTRecipe([]) }
 
   async function saveTextile() {
     if (!tCode.trim() || !tFab.trim() || tCats.length === 0) return
     if (editT) {
       const updated: Textile = { ...editT, code:tCode, name:tName, color:tColor,
-        fabricType:tFab, pattern:tPattern, weave:tWeave, machineCategories:tCats, notes:tNotes }
+        fabricType:tFab, pattern:tPattern, weave:tWeave, machineCategories:tCats, notes:tNotes,
+        threadRecipe:cleanRecipe(tRecipe) }
       setTextiles(p => p.map(t => t.id===editT.id ? updated : t))
       await dbUpsert("textiles", updated as unknown as Record<string, unknown>)
       // ── AUTO-LINK: update all orders that match this textile code
@@ -1625,7 +1685,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       setEditT(null)
     } else {
       const created: Textile = { id:Date.now(), code:tCode, name:tName, color:tColor,
-        fabricType:tFab, pattern:tPattern, weave:tWeave, machineCategories:tCats, notes:tNotes }
+        fabricType:tFab, pattern:tPattern, weave:tWeave, machineCategories:tCats, notes:tNotes,
+        threadRecipe:cleanRecipe(tRecipe) }
       setTextiles(p => [...p, created])
       await dbUpsert("textiles", created as unknown as Record<string, unknown>)
       // ── AUTO-LINK new textile: update matching existing orders
@@ -1646,10 +1707,23 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   function openEditTextile(t: Textile) {
     setTCode(t.code); setTName(t.name); setTColor(t.color); setTFab(t.fabricType)
     setTPattern(t.pattern); setTWeave(t.weave)
-    setTCats(t.machineCategories); setTNotes(t.notes); setEditT(t)
+    setTCats(t.machineCategories); setTNotes(t.notes); setTRecipe(t.threadRecipe.map(l=>({...l}))); setEditT(t)
+  }
+  function cleanRecipe(r: RecipeLine[]): RecipeLine[] {
+    // drop empty lines, merge duplicate threads
+    const m = new Map<number, number>()
+    for (const l of r) if (l.threadId && l.kgPerM > 0) m.set(l.threadId, (m.get(l.threadId) ?? 0) + l.kgPerM)
+    return [...m.entries()].map(([threadId, kgPerM]) => ({ threadId, kgPerM }))
   }
 
   async function delTextile(id: number) {
+    const t = textiles.find(x => x.id===id); if (!t) return
+    const used = orders.filter(o => o.warpStatus!=="done" && o.textileCode===t.code).length
+    if (!window.confirm(
+      `Delete textile ${t.code}${t.name?" — "+t.name:""}?\n\n`+
+      (used ? `⚠️ ${used} active order${used>1?"s use":" uses"} this textile.\n`:"")+
+      `The Excel import will no longer recognise this code.\n\nThis cannot be undone.`
+    )) return
     setTextiles(p => p.filter(t => t.id!==id))
     await dbDelete("textiles", id)
   }
@@ -1664,6 +1738,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   async function saveOrder() {
     if (!oTextileCode.trim() || !oQty || oCats.length === 0) return
     const data: Order = {
+      ...(editO ?? {}),
       id: editO ? editO.id : Date.now(),
       textileCode: oTextileCode,
       textileName: oTextileName,
@@ -1691,7 +1766,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           id: Date.now() + 1,
           code:oTextileCode, name:oTextileName, color:oColor, fabricType:oFabric,
           pattern:"", weave:"",
-          machineCategories:oCats, notes:oNotes,
+          machineCategories:oCats, notes:oNotes, threadRecipe:[],
         }
         setTextiles(p => [...p, newT])
         await dbUpsert("textiles", newT as unknown as Record<string, unknown>)
@@ -1714,6 +1789,13 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     await dbDelete("orders", id)
   }
   async function delMachine(id: number) {
+    const m = machines.find(x => x.id===id); if (!m) return
+    const queued = (schedule[id] ?? []).length
+    if (!window.confirm(
+      `Delete machine ${m.name} (${m.category})?\n\n`+
+      (queued ? `⚠️ ${queued} order${queued>1?"s are":" is"} queued on it and will be moved to other machines.\n`:"")+
+      `If it's only stopped temporarily, use "Out of order" instead.\n\nThis cannot be undone.`
+    )) return
     setMachines(p => p.filter(m => m.id!==id))
     await dbDelete("machines", id)
   }
@@ -1746,6 +1828,11 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   }
 
   async function delThread(id: number) {
+    const t = threads.find(x => x.id===id); if (!t) return
+    if (!window.confirm(
+      `Delete thread ${t.code}${t.name?" — "+t.name:""}?\n\n`+
+      `Current stock: ${t.stockKg}kg\n\nThis cannot be undone.`
+    )) return
     setThreads(p => p.filter(t => t.id!==id))
     await dbDelete("threads", id)
   }
@@ -1778,6 +1865,11 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   }
 
   async function delTextileStock(id: number) {
+    const ts = textileStock.find(x => x.id===id); if (!ts) return
+    if (!window.confirm(
+      `Delete stock item ${ts.textileCode}${ts.textileName?" — "+ts.textileName:""}?\n\n`+
+      `Current stock: ${ts.stockM}m\n\nThis cannot be undone.`
+    )) return
     setTextileStock(p => p.filter(t => t.id!==id))
     await dbDelete("textile_stock", id)
   }
@@ -1788,7 +1880,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     direction: "in"|"out", qty: number, note: string, auto = false
   ) {
     const entry: StockLogEntry = {
-      id: Date.now(), itemId, itemType, direction,
+      id: newId(), itemId, itemType, direction,
       quantityKg:  itemType==="thread"          ? qty : undefined,
       quantityM:   itemType==="textile-stock"   ? qty : undefined,
       date: new Date().toISOString().slice(0,10),
@@ -1823,22 +1915,113 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     setLogItemId(null); setLogQty(""); setLogNote(""); setShowLogM(false)
   }
 
+  // ── THREAD USE for a set of orders (woven meters × recipe) ─
+  function threadUse(list: Order[]): Map<number, number> {
+    const use = new Map<number, number>()
+    for (const o of list) {
+      const tex = textiles.find(t => t.code === o.textileCode)
+      if (!tex) continue
+      for (const l of tex.threadRecipe) use.set(l.threadId, (use.get(l.threadId) ?? 0) + l.kgPerM * o.quantity)
+    }
+    return use
+  }
+  const round2 = (n: number) => Math.round(n * 100) / 100
+  function orderRef(list: Order[]) {
+    const refs = list.map(o => o.orderNumber ? "#" + o.orderNumber : o.textileCode)
+    return refs.length > 4 ? refs.slice(0, 4).join(", ") + ` +${refs.length - 4} more` : refs.join(", ")
+  }
+
+  // Mark orders done + deduct thread automatically from each textile's recipe
+  async function markOrdersDone(list: Order[]) {
+    const now = new Date().toISOString()
+    const toDeduct = list.filter(o => !o.threadDeducted && o.quantity > 0)
+    const use = threadUse(toDeduct)
+    const deductedIds = new Set(toDeduct
+      .filter(o => (textiles.find(t => t.code === o.textileCode)?.threadRecipe.length ?? 0) > 0)
+      .map(o => o.id))
+    const ids = new Set(list.map(o => o.id))
+    const updated = orders.map(o => !ids.has(o.id) ? o : {
+      ...o, warpStatus: "done" as WarpStatus, warpClosed: true, completedAt: now,
+      threadDeducted: o.threadDeducted || deductedIds.has(o.id),
+    })
+    setOrders(updated)
+    for (const o of updated.filter(o => ids.has(o.id))) await dbUpsert("orders", o as unknown as Record<string, unknown>)
+    for (const [threadId, kg] of use) {
+      if (kg <= 0) continue
+      await addStockLog(threadId, "thread", "out", round2(kg), "Auto: orders done — " + orderRef(toDeduct), true)
+    }
+  }
+
+  // Move a done order back to active — returns its thread to stock
+  async function undoDone(o: Order, newStatus: WarpStatus = "not-started") {
+    const restored: Order = { ...o, warpStatus: newStatus, completedAt: undefined, threadDeducted: false }
+    setOrders(p => p.map(x => x.id === o.id ? restored : x))
+    await dbUpsert("orders", restored as unknown as Record<string, unknown>)
+    await db.from("orders").update({ completedAt: null }).eq("id", o.id)   // upsert skips empty fields
+    if (o.threadDeducted) {
+      for (const [threadId, kg] of threadUse([o])) {
+        if (kg > 0) await addStockLog(threadId, "thread", "in", round2(kg), "Auto: returned — order restored " + orderRef([o]), true)
+      }
+    }
+  }
+
+  // Thread needed for all open orders vs what's in stock
+  const threadNeeds = useMemo(() => {
+    const open = orders.filter(o => o.warpStatus !== "done")
+    const need = new Map<number, number>()
+    for (const o of open) {
+      const tex = textiles.find(t => t.code === o.textileCode)
+      if (!tex) continue
+      for (const l of tex.threadRecipe) need.set(l.threadId, (need.get(l.threadId) ?? 0) + l.kgPerM * o.quantity)
+    }
+    return need
+  }, [orders, textiles])
+  const threadShort = useMemo(() =>
+    threads
+      .map(t => ({ t, need: round2(threadNeeds.get(t.id) ?? 0) }))
+      .filter(x => x.need > x.t.stockKg)
+      .map(x => ({ ...x, short: round2(x.need - x.t.stockKg) })),
+    [threads, threadNeeds])
+  const recipeMissing = useMemo(() => {
+    const codes = new Set(orders.filter(o => o.warpStatus !== "done").map(o => o.textileCode))
+    return textiles.filter(t => codes.has(t.code) && t.threadRecipe.length === 0).length
+  }, [orders, textiles])
+
+  // finished stock available for a textile code
+  function stockFor(code: string): TextileStock | undefined {
+    return textileStock.find(ts => ts.textileCode === code && ts.stockM > 0)
+  }
+
+  // Fulfil an order fully or partly from finished stock
+  async function fulfilFromStock(o: Order, useM: number) {
+    const ts = stockFor(o.textileCode)
+    if (!ts) return
+    const take = Math.min(useM, ts.stockM, o.quantity)
+    if (take <= 0) return
+    const remaining = o.quantity - take
+    const note = (o.notes ? o.notes + " · " : "") + `📦 ${take}m from stock`
+    const updated: Order = { ...o, quantity: remaining, fromStockM: (o.fromStockM ?? 0) + take, notes: note }
+    await addStockLog(ts.id, "textile-stock", "out", take, "Used for order " + orderRef([o]))
+    if (remaining <= 0) {
+      // fully from stock → straight to History (nothing woven, so no thread deducted)
+      const done: Order = { ...updated, warpStatus: "done", warpClosed: true, completedAt: new Date().toISOString() }
+      setOrders(p => p.map(x => x.id === o.id ? done : x))
+      await dbUpsert("orders", done as unknown as Record<string, unknown>)
+    } else {
+      setOrders(p => p.map(x => x.id === o.id ? updated : x))
+      await dbUpsert("orders", updated as unknown as Record<string, unknown>)
+    }
+  }
+
   // ── WARP DONE: intercept to show thread deduction modal ───
   function handleWarpNextRun(orderIds: number[], label: string, machine: string, meters: number) {
     setWarpDoneGroup({ orderIds, label, machine, meters })
-    setWarpDoneThreadId(null)
-    setWarpDoneKg("")
   }
 
   async function confirmWarpDone() {
     if (!warpDoneGroup) return
     await warpNextRun(warpDoneGroup.orderIds)
-    // auto-deduct thread stock if user selected a thread
-    if (warpDoneThreadId && warpDoneKg) {
-      await addStockLog(warpDoneThreadId, "thread", "out", Number(warpDoneKg),
-        "Auto-deducted: warp done — " + warpDoneGroup.label, true)
-    }
-    setWarpDoneGroup(null); setWarpDoneThreadId(null); setWarpDoneKg("")
+    setWarpDoneGroup(null)
   }
 
   // ── LOW STOCK ALERTS ──────────────────────────────────────
@@ -1881,15 +2064,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   }
 
   async function warpGroupDone(orderIds: number[]) {
-    const now = new Date().toISOString()
-    const updated = orders.map(o => {
-      if (!orderIds.includes(o.id)) return o
-      return { ...o, warpStatus: "done" as WarpStatus, warpClosed: true, completedAt: now }
-    })
-    setOrders(updated)
-    for (const o of updated.filter(o => orderIds.includes(o.id))) {
-      await dbUpsert("orders", o as unknown as Record<string, unknown>)
-    }
+    await markOrdersDone(orders.filter(o => orderIds.includes(o.id)))
   }
 
   // Move a warp group up or down in a machine's queue
@@ -1959,6 +2134,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   }
 
   async function setWarpSt(id: number, st: WarpStatus) {
+    const cur = orders.find(o => o.id === id); if (!cur) return
+    if (st === "done" && cur.warpStatus !== "done") return markOrdersDone([cur])
+    if (st !== "done" && cur.warpStatus === "done") return undoDone(cur, st)
     const updated = orders.map(o => {
       if (o.id !== id) return o
       return {
@@ -2239,7 +2417,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     pattern:tPattern, weave:tWeave,
     categories:tCats, notes:tNotes,
     isEdit:!!editT, knownColors, knownFabrics,
-    set:{ code:setTCode, name:setTName, color:setTColor, fabricType:setTFab,
+    recipe:tRecipe, threads, textiles,
+    set:{ recipe:setTRecipe, code:setTCode, name:setTName, color:setTColor, fabricType:setTFab,
       pattern:setTPattern, weave:setTWeave,
       categories:setTCats, notes:setTNotes },
     onSave:saveTextile,
@@ -2398,6 +2577,20 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                 ⚠️ {m.name} is overloaded ({machineLoad(schedule,m.id)}m / {m.capacity}m). Reassign orders or increase capacity.
               </div>
             ))}
+
+            {/* thread shortage for open orders */}
+            {threadShort.map(x=>(
+              <div key={"short"+x.t.id} style={{...S.alert, background:"#FEEBEB", border:"0.5px solid #fca5a5", color:"#A32D2D", cursor:"pointer"}}
+                onClick={()=>setView("threads")}>
+                🪡 Thread short: <strong dir="auto">{x.t.code}{x.t.name?" — "+x.t.name:""}</strong> — open orders need {x.need}kg, you have {x.t.stockKg}kg · <strong>order {x.short}kg</strong>
+              </div>
+            ))}
+            {threads.length>0 && recipeMissing>0 && (
+              <div style={{...S.alert, background:"#F3F2FD", border:"0.5px solid #c4c0f0", color:"#534AB7", cursor:"pointer"}}
+                onClick={()=>setView("textiles")}>
+                ℹ️ {recipeMissing} textile{recipeMissing>1?"s":""} with open orders {recipeMissing>1?"have":"has"} no thread recipe yet — thread needs are incomplete until you add {recipeMissing>1?"them":"it"}.
+              </div>
+            )}
 
             {/* low stock alerts */}
             {lowStockAlerts.map((a,i)=>(
@@ -2785,6 +2978,18 @@ tr:hover td{background:#F3F2FD}
                         {o.notes&&<div style={{fontSize:11,color:"#aaa",marginTop:2,fontStyle:"italic"}}>{o.notes}</div>}
                         {o.orderNumber&&<div style={{fontSize:11,color:"#7F77DD",marginTop:2,fontWeight:500}}>#{o.orderNumber}</div>}
                         {assignedMachine&&<div style={{fontSize:11,color:"#7F77DD",marginTop:2}}>→ {assignedMachine.name}</div>}
+                        {(()=>{
+                          const ts = o.warpStatus==="not-started" ? stockFor(o.textileCode) : undefined
+                          if (!ts) return null
+                          return (
+                            <button onClick={()=>{setStockFulfil(o);setStockUseM(String(Math.min(ts.stockM,o.quantity)))}}
+                              style={{...S.btnSm,marginTop:6,fontSize:11,padding:"3px 10px",
+                                background:"#FEF3C7",color:"#92400E",border:"0.5px solid #FCD34D"}}>
+                              📦 {ts.stockM}m in stock — use it?
+                            </button>
+                          )
+                        })()}
+                        {o.fromStockM ? <div style={{fontSize:11,color:"#92400E",marginTop:2}}>📦 {o.fromStockM}m already taken from stock</div> : null}
                       </div>
                       <div style={{display:"flex",flexDirection:"column",gap:5,alignItems:"flex-end"}}>
                         <Badge text={o.priority} color={priColor(o.priority)}/>
@@ -2960,7 +3165,7 @@ tr:hover td{background:#F3F2FD}
             if (!d) continue
             const key = d.slice(0,7)
             if (!monthMeters[key]) monthMeters[key] = {ordered:0,produced:0}
-            monthMeters[key].ordered += o.quantity
+            monthMeters[key].ordered += ordQ(o)
           }
           for (const o of doneOrders) {
             const d = o.completedAt
@@ -3007,7 +3212,7 @@ tr:hover td{background:#F3F2FD}
                 <StatCard label="Total orders" val={allOrders.length} sub={`${doneOrders.length} completed`}/>
                 <StatCard label="Avg production time" val={avgProdDays!==null?`${avgProdDays}d`:null} sub={prodTimes.length?`from ${prodTimes.length} tracked orders`:"add order dates to track"}/>
                 <StatCard label="On-time rate" val={onTimeRate!==null?`${onTimeRate}%`:null} sub={withDeadline.length?`${onTime.length}/${withDeadline.length} orders`:"need deadline+done orders"}/>
-                <StatCard label="Total meters" val={`${allOrders.reduce((s,o)=>s+o.quantity,0).toLocaleString()}m`} sub={`${doneOrders.reduce((s,o)=>s+o.quantity,0).toLocaleString()}m produced`}/>
+                <StatCard label="Total meters" val={`${allOrders.reduce((s,o)=>s+ordQ(o),0).toLocaleString()}m`} sub={`${doneOrders.reduce((s,o)=>s+o.quantity,0).toLocaleString()}m produced`}/>
               </div>
 
               <div style={S.twoCol} className="dtx-twocol">
@@ -3256,7 +3461,7 @@ tr:hover td{background:#F3F2FD}
                 {(()=>{
                   const storeData = STORES.map(s=>{
                     const ords   = allOrders.filter(o=>o.store===s)
-                    const meters = ords.reduce((sum,o)=>sum+o.quantity,0)
+                    const meters = ords.reduce((sum,o)=>sum+ordQ(o),0)
                     const done   = ords.filter(o=>o.warpStatus==="done").length
                     const high   = ords.filter(o=>o.priority==="High").length
                     const overdue= ords.filter(o=>o.warpStatus!=="done"&&o.deadline&&new Date(o.deadline)<new Date()).length
@@ -3435,9 +3640,9 @@ tr:hover td{background:#F3F2FD}
                   for(const o of filtered){
                     const base=o.textileCode.split("/")[0]
                     if(!grouped[base]) grouped[base]={baseCode:base,name:o.textileName||"",meters:0,orders:0,variants:{}}
-                    grouped[base].meters+=o.quantity
+                    grouped[base].meters+=ordQ(o)
                     grouped[base].orders++
-                    grouped[base].variants[o.textileCode]=(grouped[base].variants[o.textileCode]||0)+o.quantity
+                    grouped[base].variants[o.textileCode]=(grouped[base].variants[o.textileCode]||0)+ordQ(o)
                   }
                   const sorted=Object.values(grouped).sort((a,b)=>b.meters-a.meters).slice(0,15)
                   const maxM=Math.max(...sorted.map(g=>g.meters),1)
@@ -3450,7 +3655,7 @@ tr:hover td{background:#F3F2FD}
                     <div style={{...S.card,gridColumn:"1 / -1"}}>
                       <div style={S.cHead} className="dtx-chead">
                         <span style={S.cTitle}>📅 Textile demand by period</span>
-                        <span style={S.cSub}>{presetLabel} · {filtered.length} orders · {filtered.reduce((s,o)=>s+o.quantity,0).toLocaleString()}m</span>
+                        <span style={S.cSub}>{presetLabel} · {filtered.length} orders · {filtered.reduce((s,o)=>s+ordQ(o),0).toLocaleString()}m</span>
                       </div>
                       <div style={S.cBody}>
                         {/* period selector */}
@@ -3611,16 +3816,12 @@ tr:hover td{background:#F3F2FD}
                           )}
                         </div>
                         <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
-                          <Badge text="Done" color="#639922"/>
-                          <span style={{fontSize:13,color:"#aaa"}}>{o.quantity}m</span>
+                          <Badge text={o.fromStockM && o.quantity===0 ? "From stock" : "Done"} color={o.fromStockM && o.quantity===0 ? "#BA7517" : "#639922"}/>
+                          <span style={{fontSize:13,color:"#aaa"}}>{o.quantity}m{o.fromStockM?` + ${o.fromStockM}m stock`:""}</span>
                           <Badge text={o.priority} color={priColor(o.priority)}/>
                           {/* restore button — move back to active if marked done by mistake */}
                           <button
-                            onClick={async ()=>{
-                              const restored = {...o, warpStatus:"not-started" as WarpStatus, completedAt:undefined}
-                              setOrders(p=>p.map(x=>x.id===o.id?restored:x))
-                              await dbUpsert("orders", restored as unknown as Record<string,unknown>)
-                            }}
+                            onClick={()=>undoDone(o)}
                             style={{...S.btnSm,fontSize:10,padding:"2px 8px",marginTop:2,color:"#888"}}>
                             ↩ Restore
                           </button>
@@ -3964,10 +4165,10 @@ tr:hover td{background:#F3F2FD}
             // 1. With order number (for orders that have one)
             // 2. Without order number (fallback for manually entered orders)
             const exKeysWithOn=new Set(
-              orders.filter(o=>o.orderNumber).map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${o.orderNumber}`)
+              orders.filter(o=>o.orderNumber).map(o=>`${o.textileCode}||${o.orderDate||""}||${ordQ(o)}||${o.orderNumber}`)
             )
             const exKeysNoOn=new Set(
-              orders.filter(o=>!o.orderNumber).map(o=>`${o.textileCode}||${o.orderDate||""}||${o.quantity}`)
+              orders.filter(o=>!o.orderNumber).map(o=>`${o.textileCode}||${o.orderDate||""}||${ordQ(o)}`)
             )
 
             function fmtDate(v:unknown):string {
@@ -4075,7 +4276,7 @@ tr:hover td{background:#F3F2FD}
               const alreadyExists=orders.some(o=>
                 o.textileCode===r.appCode &&
                 o.orderDate===r.ordered &&
-                o.quantity===r.qty &&
+                ordQ(o)===r.qty &&
                 (o.orderNumber||"")===(r.orderNum||"")
               )
               if(alreadyExists){ skipped++; continue }
@@ -4114,8 +4315,8 @@ tr:hover td{background:#F3F2FD}
           const appCountFull = new Map<string,number>()
           const appCountBase = new Map<string,number>()
           for(const o of orders.filter(o=>o.warpStatus!=="done")){
-            const full=`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`
-            const base=`${o.textileCode}||${o.orderDate||""}||${o.quantity}`
+            const full=`${o.textileCode}||${o.orderDate||""}||${ordQ(o)}||${(o.orderNumber||"").trim()}`
+            const base=`${o.textileCode}||${o.orderDate||""}||${ordQ(o)}`
             appCountFull.set(full,(appCountFull.get(full)||0)+1)
             appCountBase.set(base,(appCountBase.get(base)||0)+1)
           }
@@ -4127,8 +4328,8 @@ tr:hover td{background:#F3F2FD}
               const matchedBase = new Map<string,number>()
               const result:Order[]=[]
               for(const o of orders.filter(o=>o.warpStatus!=="done")){
-                const full=`${o.textileCode}||${o.orderDate||""}||${o.quantity}||${(o.orderNumber||"").trim()}`
-                const base=`${o.textileCode}||${o.orderDate||""}||${o.quantity}`
+                const full=`${o.textileCode}||${o.orderDate||""}||${ordQ(o)}||${(o.orderNumber||"").trim()}`
+                const base=`${o.textileCode}||${o.orderDate||""}||${ordQ(o)}`
                 if(o.orderNumber){
                   const excelCount=excelCountFull.get(full)||0
                   const matched=matchedFull.get(full)||0
@@ -4234,7 +4435,12 @@ tr:hover td{background:#F3F2FD}
                                 </td>
                                 <td style={{padding:"6px 8px",fontWeight:600,fontSize:11}}>{r.appCode}</td>
                                 <td style={{padding:"6px 8px",color:"#555"}} dir="auto">{r.textileName}</td>
-                                <td style={{padding:"6px 8px",fontWeight:600,color:"#534AB7"}}>{r.qty}m</td>
+                                <td style={{padding:"6px 8px",fontWeight:600,color:"#534AB7"}}>
+                                  {r.qty}m
+                                  {r.status==="new" && stockFor(r.appCode) && (
+                                    <div style={{fontSize:10,color:"#92400E",fontWeight:500}}>📦 {stockFor(r.appCode)!.stockM}m in stock</div>
+                                  )}
+                                </td>
                                 <td style={{padding:"6px 8px",color:"#aaa",fontSize:11}}>{r.ordered}</td>
                                 <td style={{padding:"6px 8px",color:"#aaa",fontSize:11}}>{r.due}</td>
                                 <td style={{padding:"6px 8px",fontSize:11}} dir="auto">{r.store}</td>
@@ -4253,11 +4459,7 @@ tr:hover td{background:#F3F2FD}
                               style={{marginLeft:"auto",padding:"5px 12px",borderRadius:6,border:"0.5px solid #A32D2D",background:"#A32D2D",color:"#fff",fontSize:11,fontWeight:600,cursor:"pointer"}}
                               onClick={async()=>{
                                 if(!window.confirm(`Mark all ${possiblyDone.length} orders as done? This cannot be undone.`)) return
-                                for(const o of possiblyDone){
-                                  const updated={...o,warpStatus:"done" as const,completedAt:new Date().toISOString()}
-                                  setOrders(p=>p.map(x=>x.id===o.id?updated:x))
-                                  await dbUpsert("orders",updated as unknown as Record<string,unknown>)
-                                }
+                                await markOrdersDone(possiblyDone)
                               }}>
                               ✓ Mark all {possiblyDone.length} as done
                             </button>
@@ -4271,11 +4473,7 @@ tr:hover td{background:#F3F2FD}
                                 </span>
                                 <button
                                   style={{flexShrink:0,marginLeft:8,padding:"2px 8px",borderRadius:4,border:"0.5px solid #A32D2D",background:"transparent",color:"#A32D2D",fontSize:10,cursor:"pointer"}}
-                                  onClick={async()=>{
-                                    const updated={...o,warpStatus:"done" as const,completedAt:new Date().toISOString()}
-                                    setOrders(p=>p.map(x=>x.id===o.id?updated:x))
-                                    await dbUpsert("orders",updated as unknown as Record<string,unknown>)
-                                  }}>
+                                  onClick={()=>markOrdersDone([o])}>
                                   ✓ done
                                 </button>
                               </div>
@@ -4355,6 +4553,23 @@ tr:hover td{background:#F3F2FD}
                               <div style={{fontSize:11,color:"#aaa"}}>Min threshold</div>
                               <div style={{fontSize:18,fontWeight:500,color:"#888"}}>{t.minThreshold}kg</div>
                             </div>}
+                            {(()=>{
+                              const need = round2(threadNeeds.get(t.id) ?? 0)
+                              if (!need) return null
+                              const short = round2(need - t.stockKg)
+                              return <>
+                                <div>
+                                  <div style={{fontSize:11,color:"#aaa"}}>Needed for open orders</div>
+                                  <div style={{fontSize:18,fontWeight:500,color:"#534AB7"}}>{need}kg</div>
+                                </div>
+                                <div>
+                                  <div style={{fontSize:11,color:"#aaa"}}>{short>0?"Short":"Left after orders"}</div>
+                                  <div style={{fontSize:18,fontWeight:600,color:short>0?"#E24B4A":"#639922"}}>
+                                    {short>0?`🔴 ${short}kg`:`${round2(-short)}kg`}
+                                  </div>
+                                </div>
+                              </>
+                            })()}
                           </div>
                           {/* recent log entries */}
                           {tLogs.length>0&&(
@@ -4918,30 +5133,57 @@ tr:hover td{background:#F3F2FD}
         </Modal>
       )}
 
+      {/* ── FULFIL FROM STOCK MODAL ─────────────────── */}
+      {stockFulfil&&(()=>{
+        const o  = stockFulfil
+        const ts = stockFor(o.textileCode)
+        const close = ()=>{setStockFulfil(null);setStockUseM("")}
+        if (!ts) return null
+        const maxUse = Math.min(ts.stockM, o.quantity)
+        const use    = Math.max(0, Math.min(Number(stockUseM)||0, maxUse))
+        const canFull = ts.stockM >= o.quantity
+        return (
+          <Modal title="📦 Use finished stock" onClose={close}>
+            <div style={{background:"#f9f9f9",borderRadius:8,padding:"12px 14px",marginBottom:14,fontSize:13,lineHeight:1.7}}>
+              <div style={{fontWeight:600}} dir="auto">{orderLabel(o)}</div>
+              <div>Order: <strong>{o.quantity}m</strong>{o.store?<span dir="auto"> · 🏪 {o.store}</span>:null}{o.orderNumber?` · #${o.orderNumber}`:""}</div>
+              <div>In stock: <strong style={{color:"#92400E"}}>{ts.stockM}m</strong></div>
+            </div>
+            {canFull && (
+              <button style={{...S.btnPrimary,width:"100%",marginBottom:12}}
+                onClick={async()=>{ await fulfilFromStock(o,o.quantity); close() }}>
+                ✓ Fulfil fully from stock — {o.quantity}m (order goes to History)
+              </button>
+            )}
+            <Field label={canFull?"Or use part of the stock (m)":"Meters to take from stock"}>
+              <input style={S.input} type="number" min="0" max={maxUse} value={stockUseM} onChange={e=>setStockUseM(e.target.value)}/>
+            </Field>
+            {use>0 && use<o.quantity && (
+              <div style={{fontSize:12,color:"#555",marginBottom:10}}>
+                Take <strong>{use}m</strong> from stock → weave the remaining <strong>{o.quantity-use}m</strong>
+              </div>
+            )}
+            <div style={{display:"flex",gap:8}}>
+              <button style={{...S.btnSm,flex:1,padding:"10px",background:"#FEF3C7",color:"#92400E",border:"0.5px solid #FCD34D",opacity:use>0?1:0.5}}
+                disabled={use<=0}
+                onClick={async()=>{ await fulfilFromStock(o,use); close() }}>
+                {use>=o.quantity?`Use ${use}m — order done`:`Use ${use}m from stock`}
+              </button>
+              <button style={{...S.btnSm,flex:1,padding:"10px"}} onClick={close}>Ignore — weave it</button>
+            </div>
+          </Modal>
+        )
+      })()}
+
       {/* ── WARP DONE DEDUCTION MODAL ─────────────────── */}
       {warpDoneGroup&&(
-        <Modal title="🔒 Warp done — log thread usage" onClose={()=>setWarpDoneGroup(null)}>
+        <Modal title="🔒 Warp done — seal warp" onClose={()=>setWarpDoneGroup(null)}>
           <div style={{fontSize:13,color:"#555",marginBottom:16,lineHeight:1.6}}>
             Warp <strong>{warpDoneGroup.label}</strong> on <strong>{warpDoneGroup.machine}</strong> is being sealed.<br/>
-            Optionally log how much thread was consumed for this warp.
+            <span style={{color:"#888",fontSize:12}}>Thread is deducted automatically when each order is marked done, using the textile's thread recipe.</span>
           </div>
-          <Field label="Thread used (optional)">
-            <select style={S.input} value={warpDoneThreadId??""} onChange={e=>setWarpDoneThreadId(Number(e.target.value)||null)}>
-              <option value="">— skip thread logging —</option>
-              {threads.map(t=>(
-                <option key={t.id} value={t.id}>{t.code}{t.name?" — "+t.name:""} ({t.stockKg}kg in stock)</option>
-              ))}
-            </select>
-          </Field>
-          {warpDoneThreadId&&(
-            <Field label="Amount consumed (kg)">
-              <input style={S.input} type="number" value={warpDoneKg} onChange={e=>setWarpDoneKg(e.target.value)} placeholder="e.g. 12.5"/>
-            </Field>
-          )}
           <div style={{display:"flex",gap:8,marginTop:8}}>
-            <button style={S.btnPrimary} onClick={confirmWarpDone}>
-              {warpDoneThreadId&&warpDoneKg?"✓ Seal warp & deduct thread":"✓ Seal warp"}
-            </button>
+            <button style={S.btnPrimary} onClick={confirmWarpDone}>✓ Seal warp</button>
             <button style={S.btnSm} onClick={()=>setWarpDoneGroup(null)}>Cancel</button>
           </div>
         </Modal>
