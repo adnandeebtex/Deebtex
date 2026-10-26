@@ -1954,7 +1954,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
   // Move a done order back to active — returns its thread to stock
   async function undoDone(o: Order, newStatus: WarpStatus = "not-started") {
-    const restored: Order = { ...o, warpStatus: newStatus, completedAt: undefined, threadDeducted: false }
+    const restored: Order = { ...o, warpStatus: newStatus, completedAt: undefined, threadDeducted: false,
+      warpClosed: newStatus === "on-machine" ? o.warpClosed : false }   // back in the queue, not a sealed warp
     setOrders(p => p.map(x => x.id === o.id ? restored : x))
     await dbUpsert("orders", restored as unknown as Record<string, unknown>)
     await db.from("orders").update({ completedAt: null }).eq("id", o.id)   // upsert skips empty fields
@@ -4301,6 +4302,32 @@ tr:hover td{background:#F3F2FD}
           const nNew  = importRows.filter(r=>r.status==="new").length
           const nDup  = importRows.filter(r=>r.status==="duplicate").length
           const nNoTex= importRows.filter(r=>r.status==="no-textile").length
+
+          // ── In the Excel but marked done in the app (marked done by mistake)
+          // Orders fully fulfilled from stock are expected to stay in the Excel until delivered → not flagged
+          const kFull=(o:Order)=>`${o.textileCode}||${o.orderDate||""}||${ordQ(o)}||${(o.orderNumber||"").trim()}`
+          const kBase=(o:Order)=>`${o.textileCode}||${o.orderDate||""}||${ordQ(o)}`
+          const actFull=new Set<string>(), actBaseNoOn=new Set<string>()
+          const doneFull=new Map<string,Order>(), doneBaseNoOn=new Map<string,Order>()
+          for(const o of orders){
+            if(o.warpStatus!=="done"){
+              actFull.add(kFull(o)); if(!o.orderNumber) actBaseNoOn.add(kBase(o))
+            } else if(!(o.fromStockM && o.quantity===0)){
+              doneFull.set(kFull(o),o); if(!o.orderNumber) doneBaseNoOn.set(kBase(o),o)
+            }
+          }
+          const markedDoneRows=new Set<number>()
+          const markedDone:Order[]=[]
+          importRows.forEach((r,i)=>{
+            if(r.status!=="duplicate") return
+            const full=`${r.appCode}||${r.ordered}||${r.qty}||${r.orderNum}`
+            const base=`${r.appCode}||${r.ordered}||${r.qty}`
+            if(actFull.has(full)||actBaseNoOn.has(base)) return
+            const o=doneFull.get(full)??doneBaseNoOn.get(base)
+            if(!o) return
+            markedDoneRows.add(i)
+            if(!markedDone.some(x=>x.id===o.id)) markedDone.push(o)
+          })
           // Count how many times each key appears in the Excel
           const excelCountFull = new Map<string,number>()
           const excelCountBase = new Map<string,number>()
@@ -4381,9 +4408,10 @@ tr:hover td{background:#F3F2FD}
 
                   {(importStatus==="preview"||importStatus==="importing"||importStatus==="done")&&(
                     <div>
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}} className="dtx-metrics">
-                        {[{l:"New",v:nNew,c:"#166534",b:"#EDFBEE"},{l:"Duplicates",v:nDup,c:"#aaa",b:"#f5f5f5"},
-                          {l:"No textile",v:nNoTex,c:"#92400E",b:"#FEF3C7"},{l:"Check if done",v:possiblyDone.length,c:"#A32D2D",b:"#FEEBEB"}
+                      <div style={{display:"grid",gridTemplateColumns:`repeat(${markedDone.length?5:4},1fr)`,gap:10,marginBottom:16}} className="dtx-metrics">
+                        {[{l:"New",v:nNew,c:"#166534",b:"#EDFBEE"},{l:"Duplicates",v:nDup-markedDoneRows.size,c:"#aaa",b:"#f5f5f5"},
+                          {l:"No textile",v:nNoTex,c:"#92400E",b:"#FEF3C7"},{l:"Check if done",v:possiblyDone.length,c:"#A32D2D",b:"#FEEBEB"},
+                          ...(markedDone.length?[{l:"Marked done by mistake?",v:markedDone.length,c:"#C2410C",b:"#FFEDD5"}]:[])
                         ].map(({l,v,c,b})=>(
                           <div key={l} style={{background:b,borderRadius:8,padding:"10px 14px"}}>
                             <div style={{fontSize:11,color:c,marginBottom:2}}>{l}</div>
@@ -4427,11 +4455,13 @@ tr:hover td{background:#F3F2FD}
                                     onChange={e=>{const s=new Set(importSelected);e.target.checked?s.add(i):s.delete(i);setImportSelected(s)}}/>
                                 </td>
                                 <td style={{padding:"6px 8px"}}>
-                                  <span style={{background:r.status==="new"?"#EDFBEE":r.status==="duplicate"?"#f5f5f5":"#FEF3C7",
+                                  {markedDoneRows.has(i)
+                                    ? <span style={{background:"#FFEDD5",color:"#C2410C",borderRadius:20,padding:"2px 7px",fontSize:11,fontWeight:600}}>marked done</span>
+                                    : <span style={{background:r.status==="new"?"#EDFBEE":r.status==="duplicate"?"#f5f5f5":"#FEF3C7",
                                     color:r.status==="new"?"#166534":r.status==="duplicate"?"#aaa":"#92400E",
                                     borderRadius:20,padding:"2px 7px",fontSize:11,fontWeight:500}}>
                                     {r.status==="no-textile"?"no textile":r.status}
-                                  </span>
+                                  </span>}
                                 </td>
                                 <td style={{padding:"6px 8px",fontWeight:600,fontSize:11}}>{r.appCode}</td>
                                 <td style={{padding:"6px 8px",color:"#555"}} dir="auto">{r.textileName}</td>
@@ -4475,6 +4505,39 @@ tr:hover td{background:#F3F2FD}
                                   style={{flexShrink:0,marginLeft:8,padding:"2px 8px",borderRadius:4,border:"0.5px solid #A32D2D",background:"transparent",color:"#A32D2D",fontSize:10,cursor:"pointer"}}
                                   onClick={()=>markOrdersDone([o])}>
                                   ✓ done
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {markedDone.length>0&&(
+                        <div style={{background:"#FFEDD5",borderRadius:8,padding:"12px 14px",marginBottom:12}}>
+                          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6,flexWrap:"wrap"}}>
+                            <span style={{fontWeight:600,color:"#C2410C",fontSize:13}}>⚠️ Marked done but still in the Excel — {markedDone.length} order{markedDone.length>1?"s":""}</span>
+                            {markedDone.length>1&&(
+                              <button
+                                style={{marginLeft:"auto",padding:"5px 12px",borderRadius:6,border:"0.5px solid #C2410C",background:"#C2410C",color:"#fff",fontSize:11,fontWeight:600,cursor:"pointer"}}
+                                onClick={async()=>{
+                                  if(!window.confirm(`Restore all ${markedDone.length} orders to active?`)) return
+                                  for(const o of markedDone) await undoDone(o)
+                                }}>
+                                ↩ Restore all {markedDone.length}
+                              </button>
+                            )}
+                          </div>
+                          <div style={{fontSize:12,color:"#C2410C",marginBottom:8}}>These are in History, but the Excel says they haven't been delivered yet. They were probably marked done by mistake — restore them to put them back in production.</div>
+                          <div style={{maxHeight:300,overflowY:"auto",background:"rgba(0,0,0,0.03)",borderRadius:6,padding:"6px 8px"}}>
+                            {markedDone.map(o=>(
+                              <div key={o.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"3px 0",borderBottom:"0.5px solid rgba(194,65,12,0.12)"}}>
+                                <span style={{fontSize:11,fontFamily:"monospace"}} dir="auto">
+                                  {o.textileCode} · {o.textileName||""} · {ordQ(o)}m{o.orderNumber?` · #${o.orderNumber}`:""}{o.store?` · ${o.store}`:""} · done {o.completedAt?o.completedAt.slice(0,10):"—"}
+                                </span>
+                                <button
+                                  style={{flexShrink:0,marginLeft:8,padding:"2px 8px",borderRadius:4,border:"0.5px solid #C2410C",background:"transparent",color:"#C2410C",fontSize:10,cursor:"pointer"}}
+                                  onClick={()=>undoDone(o)}>
+                                  ↩ Restore
                                 </button>
                               </div>
                             ))}
