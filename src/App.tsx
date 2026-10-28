@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState, useRef } from "react"
 import type { CSSProperties } from "react"
 import { createClient } from "@supabase/supabase-js"
 import type { Session } from "@supabase/supabase-js"
+import RollsView from "./Rolls"
 
 // ─── SUPABASE CLIENT ─────────────────────────────────────────
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string
@@ -245,7 +246,7 @@ type MachineCategory =
   | "Mechanical Double 280" | "Mechanical Double 140"
 type Priority   = "High" | "Normal" | "Low"
 type WarpStatus = "not-started" | "on-machine" | "done"
-type View = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history" | "suggestions" | "threads" | "textile-stock" | "import"
+type View = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history" | "suggestions" | "threads" | "textile-stock" | "import" | "rolls"
 
 // warpOrder: per-machine ordered list of warpKeys — controls which warp group runs first
 // key = machineId, value = array of warpKeys in display order
@@ -2437,6 +2438,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     {id:"history",       icon:"🕓", label:"History"},
     {id:"suggestions",   icon:"💡", label:"Suggestions"},
     {id:"import",        icon:"📥", label:"Import"},
+    {id:"rolls",         icon:"🏷", label:"Rolls"},
   ]
 
   // ── LOADING GATE ──────────────────────────────────────────
@@ -2552,6 +2554,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
             ⎋ Sign out
           </button>
         </div>
+
+        {view==="rolls" && <RollsView db={db}/>}
 
         {/* ── DASHBOARD VIEW ────────────────────────────── */}
         {view==="dashboard" && (
