@@ -2438,7 +2438,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     {id:"history",       icon:"🕓", label:"History"},
     {id:"suggestions",   icon:"💡", label:"Suggestions"},
     {id:"import",        icon:"📥", label:"Import"},
-    {id:"rolls",         icon:"🏷", label:"Rolls"},
+    {id:"rolls",         icon:"🏷", label:"Packing system"},
   ]
 
   // ── LOADING GATE ──────────────────────────────────────────

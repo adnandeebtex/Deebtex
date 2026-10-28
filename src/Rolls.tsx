@@ -43,6 +43,15 @@ const specLabel = (s: Spec) => `${s.design}${s.code ? ` · ${s.code}` : ""}${s.c
 const today = () => new Date().toISOString().slice(0, 10)
 const fmtM  = (n: number) => `${Math.round(n * 100) / 100}`
 const sumM  = (rs: Roll[]) => rs.reduce((a, r) => a + r.meters, 0)
+// list update that can NEVER create two items with the same id
+function putRows<T extends { id: number }>(list: T[], rows: T[], removeIds: number[] = []): T[] {
+  const rm = new Set(removeIds)
+  const m = new Map<number, T>()
+  for (const x of list) if (!rm.has(x.id)) m.set(x.id, x)
+  for (const r of rows) m.set(r.id, r)
+  return [...m.values()]
+}
+const uniq = <T extends { id: number }>(list: T[]) => putRows([], list)
 const esc   = (s: string) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!))
 function parseLines(v: unknown): Line[] {
   try {
@@ -237,16 +246,16 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     ;(async () => {
       const [p, k, r, s] = await Promise.all([loadAll("roll_projects", sanProject), loadAll("packs", sanPack),
         loadAll("rolls", sanRoll), loadAll("shipments", sanShipment)])
-      setProjects(p); setPacks(k); setRolls(r); setShipments(s); setLoading(false)
+      setProjects(uniq(p)); setPacks(uniq(k)); setRolls(uniq(r)); setShipments(uniq(s)); setLoading(false)
     })()
     function merge<T extends { id: number }>(set: React.Dispatch<React.SetStateAction<T[]>>, san: (r: Record<string, unknown>) => T) {
       return (payload: { eventType: string; new: unknown; old: unknown }) => {
         if (payload.eventType === "DELETE") {
           const id = Number((payload.old as Record<string, unknown>).id)
-          set(p => p.filter(x => x.id !== id)); return
+          set(p => putRows(p, [], [id])); return
         }
         const row = san(payload.new as Record<string, unknown>)
-        set(p => p.some(x => x.id === row.id) ? p.map(x => x.id === row.id ? row : x) : [...p, row])
+        set(p => putRows(p, [row]))
       }
     }
     const ch = db.channel("deebtex-packs")
@@ -258,6 +267,17 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     return () => { db.removeChannel(ch) }
   }, [db])
   useEffect(() => () => { stopCam() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── ONE ACTION AT A TIME (a second click while saving is ignored) ──
+  const busy = useRef(false)
+  const [working, setWorking] = useState(false)
+  function once<A extends unknown[]>(fn: (...a: A) => Promise<unknown>) {
+    return async (...a: A) => {
+      if (busy.current) return
+      busy.current = true; setWorking(true)
+      try { await fn(...a) } finally { busy.current = false; setWorking(false) }
+    }
+  }
 
   // ── DB WRITES (errors are shown, never silent) ──
   async function run(p: PromiseLike<{ error: { message: string } | null }>, what: string): Promise<boolean> {
@@ -299,25 +319,25 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
 
   // ── PROJECTS ──
   const blankLine = (): Line => ({ design: "", code: "", color: "", meters: 0 })
-  async function saveProject() {
+  const saveProject = once(async function saveProject() {
     if (!projForm || !projForm.name.trim()) return
     const row: Project = { ...projForm, id: projForm.id || newId(),
       targets: projForm.targets.filter(t => t.design.trim()).map(t => ({ design: t.design.trim(), code: t.code.trim(), color: t.color.trim(), meters: Number(t.meters) || 0 })) }
     if (await save("roll_projects", row)) {
-      setProjects(p => p.some(x => x.id === row.id) ? p.map(x => x.id === row.id ? row : x) : [...p, row])
+      setProjects(p => putRows(p, [row]))
       setPid(row.id); setProjForm(null)
     }
-  }
-  async function deleteProject(p: Project) {
+  })
+  const deleteProject = once(async function deleteProject(p: Project) {
     const nK = packs.filter(k => k.projectId === p.id).length
     const nS = shipments.filter(s => s.projectId === p.id).length
     if (nK || nS) { alert(`"${p.name}" has ${nK} packs and ${nS} shipments.\nDelete those first — a project with packs can't be deleted.`); return }
     if (!window.confirm(`Delete project "${p.name}"?\n\nThis cannot be undone.`)) return
     if (await run(db.from("roll_projects").delete().eq("id", p.id), "Delete")) { setProjects(x => x.filter(y => y.id !== p.id)); setPid(null) }
-  }
+  })
 
   // ── ADD ROLLS (each roll starts as its own pack) ──
-  async function addRolls(metersList: number[]) {
+  const addRolls = once(async function addRolls(metersList: number[]) {
     if (!project) return
     if (!spec.design.trim()) { setErr("Pick or type the design first."); return }
     const good = metersList.filter(m => m > 0)
@@ -333,39 +353,42 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     })
     if (!await run(db.from("packs").insert(newPacks), "Adding packs")) return
     if (!await run(db.from("rolls").insert(newRolls), "Adding rolls")) { await db.from("packs").delete().in("id", newPacks.map(k => k.id)); return }
-    setPacks(p => [...p, ...newPacks.filter(n => !p.some(x => x.id === n.id))])
-    setRolls(p => [...p, ...newRolls.filter(n => !p.some(x => x.id === n.id))])
+    setPacks(p => putRows(p, newPacks))
+    setRolls(p => putRows(p, newRolls))
     setRMeters(""); setRBulk(""); setErr("")
-  }
+  })
 
   // ── MIXED PACKS ──
   const canMix = (k: Pack) => !k.printed && k.packNo == null && !k.voided && k.shipmentId == null && rollsOf(k).length === 1
-  async function createMixed(ids: number[]) {
+  const createMixed = once(async function createMixed(ids: number[]) {
     if (!project || ids.length < 2) return
+    if (ids.some(id => { const k = packs.find(x => x.id === id); return !k || !canMix(k) })) { setMixPick(null); return }
     const k: Pack = { id: newId(), projectId: project.id, packNo: null, barcode: null, printed: false, voided: false, shipmentId: null,
       createdAt: new Date().toISOString() }
     if (!await run(db.from("packs").insert(k), "Creating pack")) return
     if (!await run(db.from("rolls").update({ packId: k.id }).in("packId", ids), "Moving rolls")) return
     await run(db.from("packs").delete().in("id", ids), "Cleaning up")
-    setPacks(p => [...p.filter(x => !ids.includes(x.id)), k])
+    setPacks(p => putRows(p, [k], ids))
     setRolls(p => p.map(r => ids.includes(r.packId) ? { ...r, packId: k.id } : r))
     setMixPick(null)
-  }
-  async function unpack(k: Pack) {
+  })
+  const unpack = once(async function unpack(k: Pack) {
     if (k.printed || k.packNo != null) { alert(`Pack ${k.packNo} already has a printed sticker.\nCancel it instead (⛔), then pack the rolls again.`); return }
     if (!window.confirm("Split this mixed pack back into separate rolls?")) return
+    if (!packs.some(x => x.id === k.id)) return
     const rs = rollsOf(k)
+    if (rs.length < 2) return
     const singles: Pack[] = rs.map((_, i) => ({ id: newId(), projectId: k.projectId, packNo: null, barcode: null, printed: false, voided: false,
       shipmentId: null, createdAt: new Date(Date.now() + i).toISOString() }))
     if (!await run(db.from("packs").insert(singles), "Unpacking")) return
     for (let i = 0; i < rs.length; i++) await run(db.from("rolls").update({ packId: singles[i].id }).eq("id", rs[i].id), "Unpacking")
     await run(db.from("packs").delete().eq("id", k.id), "Unpacking")
-    setPacks(p => [...p.filter(x => x.id !== k.id), ...singles])
+    setPacks(p => putRows(p, singles, [k.id]))
     setRolls(p => p.map(r => { const i = rs.findIndex(x => x.id === r.id); return i >= 0 ? { ...r, packId: singles[i].id } : r }))
-  }
+  })
 
   // ── EDIT / CANCEL / DELETE ──
-  async function saveEditRoll() {
+  const saveEditRoll = once(async function saveEditRoll() {
     if (!editRoll) return
     const row = { ...editRoll, design: editRoll.design.trim(), code: editRoll.code.trim(), color: editRoll.color.trim(), batch: editRoll.batch.trim() }
     if (!await save("rolls", row)) return
@@ -376,13 +399,13 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
       setPacks(p => p.map(x => x.id === k.id ? { ...x, printed: false } : x))
     }
     setEditRoll(null)
-  }
-  async function toggleVoid(k: Pack) {
+  })
+  const toggleVoid = once(async function toggleVoid(k: Pack) {
     if (k.shipmentId != null) { alert("This pack is already loaded in a shipment. Remove it from the shipment first."); return }
     if (!k.voided && !window.confirm(`Cancel pack ${k.packNo ?? "(not printed)"} — ${fmtM(sumM(rollsOf(k)))}m?\n\nIts sticker will be refused when scanned. You can bring it back later.`)) return
     if (await run(db.from("packs").update({ voided: !k.voided }).eq("id", k.id), "Saving")) setPacks(p => p.map(x => x.id === k.id ? { ...x, voided: !k.voided } : x))
-  }
-  async function deletePack(k: Pack) {
+  })
+  const deletePack = once(async function deletePack(k: Pack) {
     if (k.shipmentId != null) { alert("This pack is loaded in a shipment — remove it from the shipment first."); return }
     const rs = rollsOf(k)
     const warn = k.packNo != null ? `\n\n⚠️ A sticker was already printed for pack ${k.packNo}. If it's stuck on a roll, use "Cancel" (⛔) instead, so it gets refused when scanned.` : ""
@@ -391,10 +414,10 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     if (!await run(db.from("packs").delete().eq("id", k.id), "Delete")) return
     setRolls(p => p.filter(r => r.packId !== k.id)); setPacks(p => p.filter(x => x.id !== k.id))
     setSel(s => { const n = new Set(s); n.delete(k.id); return n })
-  }
+  })
 
   // ── PRINT (pack numbers + barcodes are given here, in order) ──
-  async function printPacks(list: Pack[]) {
+  const printPacks = once(async function printPacks(list: Pack[]) {
     if (!project) return
     const todo = list.filter(k => !k.voided && rollsOf(k).length).sort(packOrder)
     if (!todo.length) return
@@ -411,7 +434,7 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     setPacks(p => p.map(x => ready.find(r => r.id === x.id) ?? x))
     writeTo(w, printPage(`Stickers — ${project.name} (${ready.length})`,
       ready.map(k => stickerHtml(k, rollsOf(k), project)).join(""), stickerCss(lblW, lblH)))
-  }
+  })
 
   // ── SHIPMENTS ──
   function newShipmentDraft(): Shipment {
@@ -419,22 +442,22 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     return { id: 0, projectId: pid ?? 0, number: pShips.reduce((m, s) => Math.max(m, s.number), 0) + 1,
       date: today(), truck: "", driver: "", notes: "", status: "open", plan }
   }
-  async function saveShipment() {
+  const saveShipment = once(async function saveShipment() {
     if (!shipForm || !pid) return
     const row: Shipment = { ...shipForm, id: shipForm.id || newId(), projectId: pid,
       plan: shipForm.plan.filter(l => l.design.trim()).map(l => ({ design: l.design.trim(), code: l.code.trim(), color: l.color.trim(), meters: Number(l.meters) || 0 })) }
     if (await save("shipments", row)) {
-      setShipments(p => p.some(x => x.id === row.id) ? p.map(x => x.id === row.id ? row : x) : [...p, row])
+      setShipments(p => putRows(p, [row]))
       if (!shipForm.id) { setScanShipId(row.id); setTab("scan") }
       setShipForm(null)
     }
-  }
-  async function deleteShipment(s: Shipment) {
+  })
+  const deleteShipment = once(async function deleteShipment(s: Shipment) {
     const n = packs.filter(k => k.shipmentId === s.id).length
     if (n) { alert(`Shipment ${s.number} has ${n} packs loaded. Remove them first (or keep the shipment).`); return }
     if (!window.confirm(`Delete empty shipment ${s.number} (${s.date})?\n\nThis cannot be undone.`)) return
     if (await run(db.from("shipments").delete().eq("id", s.id), "Delete")) setShipments(p => p.filter(x => x.id !== s.id))
-  }
+  })
   function shipStats(s: Shipment) {
     const sp = packs.filter(k => k.shipmentId === s.id).sort(packOrder)
     const rs = sp.flatMap(k => rollsOf(k))
@@ -449,7 +472,7 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     })
     return { packs: sp, rolls: rs, lines, meters: sumM(rs) }
   }
-  async function setShipStatus(s: Shipment, status: "open" | "closed") {
+  const setShipStatus = once(async function setShipStatus(s: Shipment, status: "open" | "closed") {
     if (status === "closed") {
       const st = shipStats(s)
       const short = st.lines.filter(l => l.plan > 0 && l.loaded < l.plan)
@@ -460,7 +483,7 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     }
     const row = { ...s, status, closedAt: status === "closed" ? new Date().toISOString() : null }
     if (await save("shipments", row)) setShipments(p => p.map(x => x.id === s.id ? row : x))
-  }
+  })
 
   // ── SCANNING ──
   function beep(ok: boolean) {
@@ -514,12 +537,12 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     setUndoStack(u => u.filter(id => id !== k.id))
     lastScan.current = { code: "", t: 0 }
   }
-  async function undoLast() {
+  const undoLast = once(async function undoLast() {
     const id = undoStack[undoStack.length - 1]
     const k = packs.find(x => x.id === id)
     if (k && k.shipmentId != null) { await unload(k); say(true, `↩ Removed pack ${k.packNo} from the truck`) }
     else setUndoStack(u => u.slice(0, -1))
-  }
+  })
   async function loadLib(): Promise<H5Global> {
     const w = window as unknown as H5Global
     if (!w.Html5Qrcode) {
@@ -643,6 +666,7 @@ tr.ptot td{background:#f3f3f3;font-weight:700;font-size:11px;-webkit-print-color
 
   return (
     <div style={st.pad} className="dtx-viewpad">
+      {working && <div style={{ position: "fixed", top: 70, right: 20, zIndex: 200, background: "#534AB7", color: "#fff", padding: "7px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600, boxShadow: "0 4px 14px rgba(0,0,0,.2)" }}>Saving…</div>}
       {err && (
         <div style={{ ...st.banner, background: "#FEEBEB", color: "#A32D2D", borderColor: "#fca5a5" }}>
           ⚠️ {err} <button style={{ ...st.btn, marginLeft: 10, padding: "2px 10px" }} onClick={() => setErr("")}>OK</button>
@@ -728,11 +752,11 @@ tr.ptot td{background:#f3f3f3;font-weight:700;font-size:11px;-webkit-print-color
                 <label style={{ width: 130 }}><div style={st.lbl}>Meters</div>
                   <input style={st.input} type="number" min="0" step="0.1" value={rMeters} onChange={e => setRMeters(e.target.value)}
                     onKeyDown={e => { if (e.key === "Enter") addRolls([Number(rMeters)]) }} placeholder="100" /></label>
-                <button style={st.btnP} onClick={() => addRolls([Number(rMeters)])}>+ Add roll</button>
+                <button style={{ ...st.btnP, opacity: working ? 0.5 : 1 }} disabled={working} onClick={() => addRolls([Number(rMeters)])}>+ Add roll</button>
                 <span style={{ fontSize: 12, color: "#aaa", padding: "0 4px 9px" }}>or several:</span>
                 <label style={{ flex: 1, minWidth: 180 }}><div style={st.lbl}>Meters separated by commas</div>
                   <input style={st.input} value={rBulk} onChange={e => setRBulk(e.target.value)} placeholder="100, 98, 102.5" /></label>
-                <button style={st.btn} onClick={() => addRolls(rBulk.split(/[,\s،]+/).map(Number))}>
+                <button style={{ ...st.btn, opacity: working ? 0.5 : 1 }} disabled={working} onClick={() => addRolls(rBulk.split(/[,\s،]+/).map(Number))}>
                   + Add {rBulk.split(/[,\s،]+/).map(Number).filter(n => n > 0).length || ""} rolls</button>
               </div>
             </div>
@@ -748,7 +772,7 @@ tr.ptot td{background:#f3f3f3;font-weight:700;font-size:11px;-webkit-print-color
                   <input type="number" style={st.tiny} value={lblH} onChange={e => setLblH(Number(e.target.value) || 100)} />mm</span>
                 <button style={{ ...st.btn, opacity: mixable.length >= 2 ? 1 : 0.5 }} disabled={mixable.length < 2} onClick={() => setMixPick(new Set())}>📦 Create pack</button>
                 {sel.size > 0 && <button style={st.btn} onClick={() => printPacks(pPacks.filter(k => sel.has(k.id)))}>🖨 Print selected ({sel.size})</button>}
-                <button style={{ ...st.btnP, opacity: toPrint.length ? 1 : 0.5 }} disabled={!toPrint.length} onClick={() => printPacks(toPrint)}>
+                <button style={{ ...st.btnP, opacity: toPrint.length && !working ? 1 : 0.5 }} disabled={!toPrint.length || working} onClick={() => printPacks(toPrint)}>
                   🖨 Print new stickers ({toPrint.length})</button>
               </div>
             </div>
@@ -946,8 +970,8 @@ tr.ptot td{background:#f3f3f3;font-weight:700;font-size:11px;-webkit-print-color
             ) })}
           </div>
           {(() => { const picked = mixable.filter(k => mixPick.has(k.id)); const m = picked.reduce((a, k) => a + sumM(rollsOf(k)), 0); return (
-            <button style={{ ...st.btnP, padding: 11, opacity: picked.length >= 2 ? 1 : 0.5 }} disabled={picked.length < 2} onClick={() => createMixed(picked.map(k => k.id))}>
-              {picked.length >= 2 ? `Create pack · ${picked.length} rolls · ${fmtM(m)}m` : "Pick at least 2 rolls"}</button>
+            <button style={{ ...st.btnP, padding: 11, opacity: picked.length >= 2 && !working ? 1 : 0.5 }} disabled={picked.length < 2 || working} onClick={() => createMixed(picked.map(k => k.id))}>
+              {working ? "Saving…" : picked.length >= 2 ? `Create pack · ${picked.length} rolls · ${fmtM(m)}m` : "Pick at least 2 rolls"}</button>
           ) })()}
         </Overlay>
       )}
@@ -967,7 +991,7 @@ tr.ptot td{background:#f3f3f3;font-weight:700;font-size:11px;-webkit-print-color
           </div>
           <label><div style={st.lbl}>Notes (optional)</div>
             <input style={st.input} value={projForm.notes} onChange={e => setProjForm({ ...projForm, notes: e.target.value })} dir="auto" /></label>
-          <button style={{ ...st.btnP, padding: 11 }} onClick={saveProject}>{projForm.id ? "Save changes" : "Create project"}</button>
+          <button style={{ ...st.btnP, padding: 11, opacity: working ? 0.5 : 1 }} disabled={working} onClick={saveProject}>{projForm.id ? "Save changes" : "Create project"}</button>
         </Overlay>
       )}
 
@@ -986,7 +1010,7 @@ tr.ptot td{background:#f3f3f3;font-weight:700;font-size:11px;-webkit-print-color
             <button style={st.btn} onClick={() => setShipForm({ ...shipForm, plan: [...shipForm.plan, blankLine()] })}>+ Add design</button>
           </div>
           <label><div style={st.lbl}>Notes (optional)</div><input style={st.input} value={shipForm.notes} onChange={e => setShipForm({ ...shipForm, notes: e.target.value })} dir="auto" /></label>
-          <button style={{ ...st.btnP, padding: 11 }} onClick={saveShipment}>{shipForm.id ? "Save changes" : "Create & start scanning"}</button>
+          <button style={{ ...st.btnP, padding: 11, opacity: working ? 0.5 : 1 }} disabled={working} onClick={saveShipment}>{shipForm.id ? "Save changes" : "Create & start scanning"}</button>
         </Overlay>
       )}
 
@@ -1002,7 +1026,7 @@ tr.ptot td{background:#f3f3f3;font-weight:700;font-size:11px;-webkit-print-color
             <label><div style={st.lbl}>Meters</div><input style={st.input} type="number" min="0" step="0.1" value={editRoll.meters || ""} onChange={e => setEditRoll({ ...editRoll, meters: Number(e.target.value) })} /></label>
           </div>
           <div style={{ fontSize: 12, color: "#888" }}>If the sticker was already printed, the pack keeps its number and barcode and is marked "reprint" so you print the corrected sticker.</div>
-          <button style={{ ...st.btnP, padding: 11 }} onClick={saveEditRoll}>Save</button>
+          <button style={{ ...st.btnP, padding: 11, opacity: working ? 0.5 : 1 }} disabled={working} onClick={saveEditRoll}>Save</button>
         </Overlay>
       )}
     </div>
