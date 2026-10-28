@@ -290,6 +290,7 @@ type TextileFamily = {
   base_code: string       // e.g. "1138"
   name: string            // e.g. "مونتانا"
   production_code: string // e.g. "16547"
+  name_en?: string        // e.g. "Montana" — used by the packing system (stickers / packing list)
 }
 
 type Machine = {
@@ -2426,6 +2427,23 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     onSave:saveTextile,
   }
 
+  // ── English design name per base code (packing system) ─────
+  async function saveFamilyEnglishName(base: string, arabicName: string, nameEn: string): Promise<boolean> {
+    const exists = textileFamilies.find(f => f.base_code === base)
+    const headers = {"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Content-Type":"application/json"}
+    const res = exists
+      ? await fetch(`${SUPABASE_URL}/rest/v1/textile_families?base_code=eq.${encodeURIComponent(base)}`,
+          { method:"PATCH", headers, body:JSON.stringify({name_en:nameEn}) })
+      : await fetch(`${SUPABASE_URL}/rest/v1/textile_families`,
+          { method:"POST", headers:{...headers,"Prefer":"resolution=merge-duplicates"},
+            body:JSON.stringify({base_code:base,name:arabicName,production_code:"",name_en:nameEn}) })
+    if (!res.ok) return false
+    setTextileFamilies(p => exists
+      ? p.map(f => f.base_code === base ? { ...f, name_en: nameEn } : f)
+      : [...p, { base_code:base, name:arabicName, production_code:"", name_en:nameEn }].sort((a,b)=>a.base_code.localeCompare(b.base_code)))
+    return true
+  }
+
   // ── NAV ───────────────────────────────────────────────────
   const NAV: {id:View;icon:string;label:string}[] = [
     {id:"dashboard",     icon:"⊞", label:"Dashboard"},
@@ -2555,7 +2573,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
           </button>
         </div>
 
-        {view==="rolls" && <RollsView db={db}/>}
+        {view==="rolls" && <RollsView db={db} textiles={textiles} families={textileFamilies} saveEnglishName={saveFamilyEnglishName}/>}
 
         {/* ── DASHBOARD VIEW ────────────────────────────── */}
         {view==="dashboard" && (
@@ -4838,11 +4856,13 @@ tr:hover td{background:#F3F2FD}
               {showFamilies&&(
                 <div style={S.cBody}>
                   {/* Add new family row */}
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 2fr 1fr auto",gap:8,marginBottom:16,alignItems:"center"}}>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 2fr 2fr 1fr auto",gap:8,marginBottom:16,alignItems:"center"}}>
                     <input style={S.input} placeholder="Base code (e.g. 1138)" dir="auto"
                       value={newFam.base_code} onChange={e=>setNewFam(p=>({...p,base_code:e.target.value}))}/>
                     <input style={S.input} placeholder="Design name (e.g. مونتانا)" dir="auto"
                       value={newFam.name} onChange={e=>setNewFam(p=>({...p,name:e.target.value}))}/>
+                    <input style={S.input} placeholder="English name (e.g. Montana)"
+                      value={newFam.name_en??""} onChange={e=>setNewFam(p=>({...p,name_en:e.target.value}))}/>
                     <input style={S.input} placeholder="Production code (e.g. 16547)"
                       value={newFam.production_code} onChange={e=>setNewFam(p=>({...p,production_code:e.target.value}))}/>
                     <button style={S.btnPrimary} onClick={async()=>{
@@ -4850,7 +4870,8 @@ tr:hover td{background:#F3F2FD}
                       const fam:TextileFamily={
                         base_code:newFam.base_code.trim(),
                         name:newFam.name.trim(),
-                        production_code:newFam.production_code.trim()
+                        production_code:newFam.production_code.trim(),
+                        name_en:(newFam.name_en??"").trim(),
                       }
                       await fetch(`${SUPABASE_URL}/rest/v1/textile_families`,{
                         method:"POST",
@@ -4871,7 +4892,7 @@ tr:hover td{background:#F3F2FD}
                       <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
                         <thead>
                           <tr style={{background:"#f5f5f5"}}>
-                            {["Base code","Design name","Production code (كود الرسم)",""].map(h=>(
+                            {["Base code","Design name","English name","Production code (كود الرسم)",""].map(h=>(
                               <th key={h} style={{padding:"8px 12px",textAlign:"right",fontWeight:500,color:"#555",fontSize:12}}>{h}</th>
                             ))}
                           </tr>
@@ -4887,6 +4908,10 @@ tr:hover td{background:#F3F2FD}
                                       onChange={e=>setEditFam(p=>p?{...p,name:e.target.value}:p)}/>
                                   </td>
                                   <td style={{padding:"4px 8px"}}>
+                                    <input style={{...S.input,fontSize:12}} value={editFam.name_en??""} placeholder="English name"
+                                      onChange={e=>setEditFam(p=>p?{...p,name_en:e.target.value}:p)}/>
+                                  </td>
+                                  <td style={{padding:"4px 8px"}}>
                                     <input style={{...S.input,fontSize:12}} value={editFam.production_code}
                                       onChange={e=>setEditFam(p=>p?{...p,production_code:e.target.value}:p)}/>
                                   </td>
@@ -4897,7 +4922,7 @@ tr:hover td{background:#F3F2FD}
                                         await fetch(`${SUPABASE_URL}/rest/v1/textile_families?base_code=eq.${editFam.base_code}`,{
                                           method:"PATCH",
                                           headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Content-Type":"application/json"},
-                                          body:JSON.stringify({name:editFam.name,production_code:editFam.production_code})
+                                          body:JSON.stringify({name:editFam.name,production_code:editFam.production_code,name_en:(editFam.name_en??"").trim()})
                                         })
                                         setTextileFamilies(p=>p.map(x=>x.base_code===editFam.base_code?editFam:x))
                                         setEditFam(null)
@@ -4910,6 +4935,7 @@ tr:hover td{background:#F3F2FD}
                                 <>
                                   <td style={{padding:"8px 12px",fontWeight:600,fontFamily:"monospace"}}>{f.base_code}</td>
                                   <td style={{padding:"8px 12px"}} dir="auto">{f.name||"—"}</td>
+                                  <td style={{padding:"8px 12px",color:f.name_en?"#1a1a1a":"#ccc"}}>{f.name_en||"—"}</td>
                                   <td style={{padding:"8px 12px",fontWeight:600,color:"#534AB7",fontFamily:"monospace"}}>{f.production_code}</td>
                                   <td style={{padding:"8px 12px"}}>
                                     <div style={{display:"flex",gap:6}}>

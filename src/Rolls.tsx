@@ -25,6 +25,18 @@ type Shipment = {
   status: "open" | "closed"; plan: Line[]; closedAt?: string | null
 }
 type Tab = "packs" | "shipments" | "scan"
+type TextileRef = { code: string; name: string; color: string }   // from the app's textiles database
+type FamilyRef  = { base_code: string; name: string; name_en?: string }
+
+// 1007/02/03 → base "1007", code "1007/02", color "03"; design = English name of base 1007
+function specFromTextile(t: TextileRef, families: FamilyRef[]): Spec & { base: string; needsEn: boolean } {
+  const parts = t.code.split("/").map(x => x.trim()).filter(Boolean)
+  const base = parts[0] ?? t.code
+  const en = families.find(f => f.base_code === base)?.name_en?.trim() || ""
+  const code  = parts.length > 1 ? parts.slice(0, -1).join("/") : t.code
+  const color = parts.length > 1 ? parts[parts.length - 1] : t.color
+  return { design: en, code, color, base, needsEn: !en }
+}
 
 // html5-qrcode (loaded from CDN on first use, like the Excel reader)
 type H5Scanner = {
@@ -191,7 +203,10 @@ table.it{width:100%;border-collapse:collapse;margin-top:${mm(1.8)};table-layout:
 }
 
 // ─── COMPONENT ───────────────────────────────────────────────
-export default function RollsView({ db }: { db: SupabaseClient }) {
+export default function RollsView({ db, textiles = [], families = [], saveEnglishName }: {
+  db: SupabaseClient; textiles?: TextileRef[]; families?: FamilyRef[]
+  saveEnglishName?: (base: string, arabicName: string, nameEn: string) => Promise<boolean>
+}) {
   const [projects,  setProjects]  = useState<Project[]>([])
   const [packs,     setPacks]     = useState<Pack[]>([])
   const [rolls,     setRolls]     = useState<Roll[]>([])
@@ -213,6 +228,8 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
   const [rBulk,    setRBulk]    = useState("")
   const [sel,      setSel]      = useState<Set<number>>(new Set())
   const [filter,   setFilter]   = useState("")
+  const [texQ,     setTexQ]     = useState("")
+  const [enAsk,    setEnAsk]    = useState<{ base: string; arabic: string; value: string } | null>(null)
   const [lblW, setLblW] = useState(() => { try { return Number(localStorage.getItem("dtx_pack_lbl_w")) || 50 } catch { return 50 } })
   const [lblH, setLblH] = useState(() => { try { return Number(localStorage.getItem("dtx_pack_lbl_h")) || 100 } catch { return 100 } })
 
@@ -325,7 +342,7 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
       targets: projForm.targets.filter(t => t.design.trim()).map(t => ({ design: t.design.trim(), code: t.code.trim(), color: t.color.trim(), meters: Number(t.meters) || 0 })) }
     if (await save("roll_projects", row)) {
       setProjects(p => putRows(p, [row]))
-      setPid(row.id); setProjForm(null)
+      setPid(row.id); setProjForm(null); setEnAsk(null)
     }
   })
   const deleteProject = once(async function deleteProject(p: Project) {
@@ -978,12 +995,65 @@ tr.ptot td{background:#f3f3f3;font-weight:700;font-size:11px;-webkit-print-color
 
       {/* ── PROJECT FORM ── */}
       {projForm && (
-        <Overlay title={projForm.id ? "Edit project" : "New project"} onClose={() => setProjForm(null)}>
+        <Overlay title={projForm.id ? "Edit project" : "New project"} onClose={() => { setProjForm(null); setEnAsk(null) }}>
           <label><div style={st.lbl}>Project name</div>
             <input style={st.input} value={projForm.name} onChange={e => setProjForm({ ...projForm, name: e.target.value })} placeholder="e.g. Flamingo hotel order" dir="auto" autoFocus /></label>
           <label><div style={st.lbl}>Customer (printed on stickers)</div>
             <input style={st.input} value={projForm.customer} onChange={e => setProjForm({ ...projForm, customer: e.target.value })} placeholder="e.g. PrideInn Flamingo Beach Resort" dir="auto" /></label>
           <div><div style={st.lbl}>Ordered meters — design · code · color · meters</div>
+            {textiles.length > 0 && (() => {
+              const q = norm(texQ)
+              const hits = q ? textiles.filter(t => norm(t.code).includes(q) || norm(t.name).includes(q) || norm(t.color).includes(q)).slice(0, 12) : []
+              return (
+                <div style={{ position: "relative", marginBottom: 8 }}>
+                  <input style={{ ...st.input, background: "#F8F7FF", borderColor: "#c4c0f0" }} value={texQ} onChange={e => setTexQ(e.target.value)} dir="auto"
+                    placeholder={`🔍 Add from your textiles (${textiles.length}) — type a code or name`} />
+                  {q && (
+                    <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 5, background: "#fff", border: "0.5px solid #ddd", borderRadius: 8, boxShadow: "0 6px 18px rgba(0,0,0,.12)", maxHeight: 260, overflowY: "auto" }}>
+                      {hits.length === 0 && <div style={{ padding: "10px 12px", fontSize: 13, color: "#aaa" }}>No textile matches — type the line by hand below</div>}
+                      {hits.map(t => { const sp = specFromTextile(t, families); return (
+                        <div key={t.code} style={{ padding: "8px 12px", cursor: "pointer", borderBottom: "0.5px solid #f3f3f3", fontSize: 13 }}
+                          onMouseDown={e => { e.preventDefault()
+                            // design stays empty until it has an English name → the box below asks for it once
+                            const line = { design: sp.design || t.name, code: sp.code, color: sp.color, meters: 0 }
+                            const empty = projForm.targets.findIndex(x => !x.design.trim())
+                            const targets = empty >= 0 ? projForm.targets.map((x, j) => j === empty ? line : x) : [...projForm.targets, line]
+                            setProjForm({ ...projForm, targets }); setTexQ("")
+                            if (sp.needsEn) setEnAsk({ base: sp.base, arabic: t.name, value: "" }) }}
+                          onMouseEnter={e => (e.currentTarget.style.background = "#F3F2FD")} onMouseLeave={e => (e.currentTarget.style.background = "")}>
+                          <b dir="auto">{t.code}</b>{t.name ? <span dir="auto"> — {t.name}</span> : null}{t.color ? <span style={{ color: "#999" }} dir="auto"> · {t.color}</span> : null}
+                          <div style={{ fontSize: 11, color: sp.needsEn ? "#B45309" : "#7F77DD" }}>
+                            → {sp.needsEn ? `no English name yet · code ${sp.code} · color ${sp.color}` : specLabel(sp)}</div>
+                        </div>
+                      ) })}
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
+            {enAsk && (
+              <div style={{ background: "#FFF7ED", border: "0.5px solid #FDBA74", borderRadius: 8, padding: "10px 12px", marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: "#9A3412", marginBottom: 6 }}>
+                  <b dir="auto">{enAsk.arabic || enAsk.base}</b> ({enAsk.base}) has no English name yet. Type it once — it's saved to your textiles for next time.
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <input style={st.input} autoFocus placeholder="English name, e.g. Layaly" value={enAsk.value}
+                    onChange={e => setEnAsk({ ...enAsk, value: e.target.value })}
+                    onKeyDown={e => { if (e.key === "Enter") (e.currentTarget.nextSibling as HTMLButtonElement)?.click() }} />
+                  <button style={{ ...st.btnP, opacity: enAsk.value.trim() && !working ? 1 : 0.5 }} disabled={!enAsk.value.trim() || working}
+                    onClick={async () => {
+                      const en = enAsk.value.trim(); if (!en) return
+                      const ok = saveEnglishName ? await saveEnglishName(enAsk.base, enAsk.arabic, en) : false
+                      if (!ok) { setErr("Couldn't save the English name — check your internet and try again."); return }
+                      // replace the Arabic name in this project's lines for that design
+                      setProjForm(f => f && ({ ...f, targets: f.targets.map(x =>
+                        x.code.split("/")[0] === enAsk.base && (x.design === enAsk.arabic || !x.design.trim()) ? { ...x, design: en } : x) }))
+                      setEnAsk(null)
+                    }}>Save</button>
+                  <button style={st.btn} onClick={() => setEnAsk(null)}>Later</button>
+                </div>
+              </div>
+            )}
             {projForm.targets.map((t, i) => <div key={i}>{lineInputs(t,
               l => setProjForm({ ...projForm, targets: projForm.targets.map((x, j) => j === i ? l : x) }),
               () => setProjForm({ ...projForm, targets: projForm.targets.filter((_, j) => j !== i) }))}</div>)}
