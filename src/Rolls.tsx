@@ -1,31 +1,30 @@
 // ============================================================
 //  DEEBTEX — Rolls.tsx
-//  Roll stickers (barcodes) + shipment scanning for projects that
+//  Packs (barcode stickers) + shipment scanning for projects that
 //  run outside the normal order system (e.g. hotel orders).
-//  Tables: roll_projects, rolls, shipments
+//  A PACK is what gets one sticker: normally one roll, or a
+//  "mixed pack" of several small rolls wound together.
+//  Tables: roll_projects, packs, rolls, shipments
 // ============================================================
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { CSSProperties } from "react"
 import type { SupabaseClient } from "@supabase/supabase-js"
 
 // ─── TYPES ───────────────────────────────────────────────────
-type TargetLine = { textile: string; meters: number }
-type Project = {
-  id: number; name: string; customer: string
-  targets: TargetLine[]; notes: string; closed: boolean; createdAt?: string
+type Spec = { design: string; code: string; color: string }
+type Line = Spec & { meters: number }
+type Project = { id: number; name: string; customer: string; targets: Line[]; notes: string; closed: boolean }
+type Pack = {
+  id: number; projectId: number; packNo: number | null; barcode: string | null
+  printed: boolean; voided: boolean; shipmentId: number | null; createdAt?: string
 }
-type Roll = {
-  id: number; code: string; projectId: number; rollNo: number
-  textile: string; meters: number; voided: boolean
-  shipmentId: number | null; printed: boolean; createdAt?: string
-}
+type Roll = Spec & { id: number; projectId: number; packId: number; batch: string; meters: number; createdAt?: string }
 type Shipment = {
   id: number; projectId: number; number: number; date: string
   truck: string; driver: string; notes: string
-  status: "open" | "closed"; plan: TargetLine[]
-  createdAt?: string; closedAt?: string | null
+  status: "open" | "closed"; plan: Line[]; closedAt?: string | null
 }
-type Tab = "rolls" | "shipments" | "scan"
+type Tab = "packs" | "shipments" | "scan"
 
 // html5-qrcode (loaded from CDN on first use, like the Excel reader)
 type H5Scanner = {
@@ -33,44 +32,38 @@ type H5Scanner = {
   stop: () => Promise<void>
   clear: () => void
 }
-type H5Global = {
-  Html5Qrcode: new (id: string, cfg: unknown) => H5Scanner
-  Html5QrcodeSupportedFormats: Record<string, number>
-}
+type H5Global = { Html5Qrcode: new (id: string, cfg: unknown) => H5Scanner; Html5QrcodeSupportedFormats: Record<string, number> }
 
 // ─── SMALL HELPERS ───────────────────────────────────────────
 let _seq = 0
 function newId() { _seq = (_seq + 1) % 1000; return Date.now() * 1000 + _seq }
-const norm  = (s: string) => s.trim().toLowerCase()
+const norm  = (s: string) => String(s ?? "").trim().toLowerCase()
+const keyOf = (s: Spec) => `${norm(s.design)}|${norm(s.code)}|${norm(s.color)}`
+const specLabel = (s: Spec) => `${s.design}${s.code ? ` · ${s.code}` : ""}${s.color ? ` · color ${s.color}` : ""}`
 const today = () => new Date().toISOString().slice(0, 10)
 const fmtM  = (n: number) => `${Math.round(n * 100) / 100}`
+const sumM  = (rs: Roll[]) => rs.reduce((a, r) => a + r.meters, 0)
 const esc   = (s: string) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!))
-function parseLines(v: unknown): TargetLine[] {
+function parseLines(v: unknown): Line[] {
   try {
     const a = typeof v === "string" ? JSON.parse(v) : v
-    return Array.isArray(a) ? a.map(x => ({ textile: String(x.textile ?? ""), meters: Number(x.meters) || 0 })).filter(x => x.textile) : []
+    return Array.isArray(a) ? a.map(x => ({ design: String(x.design ?? ""), code: String(x.code ?? ""), color: String(x.color ?? ""), meters: Number(x.meters) || 0 })).filter(x => x.design) : []
   } catch { return [] }
 }
-function sanProject(r: Record<string, unknown>): Project {
-  return { id: Number(r.id), name: String(r.name ?? ""), customer: String(r.customer ?? ""),
-    targets: parseLines(r.targets), notes: String(r.notes ?? ""), closed: r.closed === true,
-    createdAt: r.createdAt ? String(r.createdAt) : undefined }
-}
-function sanRoll(r: Record<string, unknown>): Roll {
-  return { id: Number(r.id), code: String(r.code ?? ""), projectId: Number(r.projectId),
-    rollNo: Number(r.rollNo) || 0, textile: String(r.textile ?? ""), meters: Number(r.meters) || 0,
-    voided: r.voided === true, shipmentId: r.shipmentId != null ? Number(r.shipmentId) : null,
-    printed: r.printed === true, createdAt: r.createdAt ? String(r.createdAt) : undefined }
-}
-function sanShipment(r: Record<string, unknown>): Shipment {
-  return { id: Number(r.id), projectId: Number(r.projectId), number: Number(r.number) || 0,
-    date: String(r.date ?? ""), truck: String(r.truck ?? ""), driver: String(r.driver ?? ""),
-    notes: String(r.notes ?? ""), status: r.status === "closed" ? "closed" : "open",
-    plan: parseLines(r.plan), createdAt: r.createdAt ? String(r.createdAt) : undefined,
-    closedAt: r.closedAt ? String(r.closedAt) : null }
-}
+const sanProject = (r: Record<string, unknown>): Project => ({ id: Number(r.id), name: String(r.name ?? ""), customer: String(r.customer ?? ""),
+  targets: parseLines(r.targets), notes: String(r.notes ?? ""), closed: r.closed === true })
+const sanPack = (r: Record<string, unknown>): Pack => ({ id: Number(r.id), projectId: Number(r.projectId),
+  packNo: r.packNo != null ? Number(r.packNo) : null, barcode: r.barcode ? String(r.barcode) : null,
+  printed: r.printed === true, voided: r.voided === true, shipmentId: r.shipmentId != null ? Number(r.shipmentId) : null,
+  createdAt: r.createdAt ? String(r.createdAt) : undefined })
+const sanRoll = (r: Record<string, unknown>): Roll => ({ id: Number(r.id), projectId: Number(r.projectId), packId: Number(r.packId),
+  design: String(r.design ?? ""), code: String(r.code ?? ""), color: String(r.color ?? ""), batch: String(r.batch ?? ""),
+  meters: Number(r.meters) || 0, createdAt: r.createdAt ? String(r.createdAt) : undefined })
+const sanShipment = (r: Record<string, unknown>): Shipment => ({ id: Number(r.id), projectId: Number(r.projectId), number: Number(r.number) || 0,
+  date: String(r.date ?? ""), truck: String(r.truck ?? ""), driver: String(r.driver ?? ""), notes: String(r.notes ?? ""),
+  status: r.status === "closed" ? "closed" : "open", plan: parseLines(r.plan), closedAt: r.closedAt ? String(r.closedAt) : null })
 
-// ─── CODE 128 (B) BARCODE → SVG ──────────────────────────────
+// ─── CODE 128 BARCODE → SVG (numbers use set C = thicker bars) ─
 const C128 = ["212222","222122","222221","121223","121322","131222","122213","122312","132212","221213",
 "221312","231212","112232","122132","122231","113222","123122","123221","223211","221132","221231","213212",
 "223112","312131","311222","321122","321221","312212","322112","322211","212123","212321","232121","111323",
@@ -82,9 +75,10 @@ const C128 = ["212222","222122","222221","121223","121322","131222","122213","12
 "131141","114113","114311","411113","411311","113141","114131","311141","411131","211412","211214","211232",
 "2331112"]
 function code128Svg(text: string): string {
-  const vals = [104]
-  for (const ch of text) { const c = ch.charCodeAt(0); if (c >= 32 && c <= 127) vals.push(c - 32) }
-  let sum = 104
+  const vals = /^\d+$/.test(text) && text.length % 2 === 0
+    ? [105, ...text.match(/\d\d/g)!.map(Number)]
+    : [104, ...[...text].map(ch => ch.charCodeAt(0) - 32).filter(v => v >= 0 && v < 96)]
+  let sum = vals[0]
   for (let i = 1; i < vals.length; i++) sum += vals[i] * i
   vals.push(sum % 103, 106)
   const quiet = 10
@@ -102,8 +96,8 @@ function code128Svg(text: string): string {
 }
 
 // ─── PRINT HELPERS ───────────────────────────────────────────
-function openPrint(title: string, body: string, css: string) {
-  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>${esc(title)}</title>
+function printPage(title: string, body: string, css: string) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>${esc(title)}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Arial,'Segoe UI',Tahoma,sans-serif;color:#000}
@@ -116,59 +110,81 @@ ${css}
 </style></head><body>
 <div class="bar"><span>${esc(title)}</span><button onclick="window.print()">🖨 Print / Save as PDF</button><span class="hint">In the print window choose "Save as PDF" to get a file</span></div>
 <div class="wrap">${body}</div></body></html>`
-  const w = window.open("", "_blank")
-  if (!w) { alert("Please allow pop-ups for this site to print."); return }
-  w.document.write(html); w.document.close(); w.focus()
 }
+// window must be opened directly in the click (otherwise the browser blocks the pop-up)
+function openBlank(): Window | null {
+  const w = window.open("", "_blank")
+  if (!w) { alert("Please allow pop-ups for this site to print."); return null }
+  w.document.write("<p style='font:14px Arial;padding:20px;color:#888'>Preparing…</p>")
+  return w
+}
+function writeTo(w: Window, html: string) { w.document.open(); w.document.write(html); w.document.close(); w.focus() }
 
-function stickerHtml(r: Roll, p: Project) {
-  return `<div class="lbl">
-  <div class="top">
-    <img class="logo" src="${LOGO}" alt="Deebtex"/>
-    <div class="roll"><div class="k">ROLL NO. · رقم الرول</div><div class="rn">${r.rollNo}</div></div>
-  </div>
-  <div class="mid">
-    <div class="k">TEXTILE · القماش</div>
-    <div class="tex" dir="auto">${esc(r.textile)}</div>
-    <div class="row">
-      <div class="cell"><div class="k">METERS · الأمتار</div><div class="m">${fmtM(r.meters)}<small> m</small></div></div>
-      <div class="cell grow"><div class="k">CUSTOMER · العميل</div><div class="cu" dir="auto">${esc(p.customer || p.name)}</div></div>
-    </div>
-  </div>
-  <div class="bc">${code128Svg(r.code)}</div>
-  <div class="code">${esc(r.code)}</div>
-  <div class="foot">MADE IN EGYPT &nbsp;·&nbsp; صنع في مصر</div>
+const AR_PACK = "رقم الطرد", AR_DESIGN = "الرسمة"
+function stickerHtml(p: Pack, rs: Roll[], proj: Project) {
+  const mixed = rs.length > 1
+  const head = `<img class="logo" src="${LOGO}"/>
+<div class="pack"><div class="k">PACK NO. · ${AR_PACK}</div><div class="n">${p.packNo ?? ""}</div>${mixed ? `<div class="mx">MIXED PACK · ${rs.length} PIECES · طرد مجمع</div>` : ""}</div>`
+  let mid: string
+  if (!mixed) {
+    const r = rs[0]
+    mid = `<div class="f"><div class="k">DESIGN · ${AR_DESIGN}</div><div class="big" dir="auto">${esc(r.design)}</div></div>
+<div class="grid">
+ <div><div class="k">CODE · الكود</div><div class="v" dir="auto">${esc(r.code || "—")}</div></div>
+ <div><div class="k">COLOR · اللون</div><div class="v" dir="auto">${esc(r.color || "—")}</div></div>
+ <div><div class="k">BATCH · التشغيلة</div><div class="v" dir="auto">${esc(r.batch || "—")}</div></div>
+ <div><div class="k">METERS · الأمتار</div><div class="m">${fmtM(r.meters)}<small> m</small></div></div>
 </div>`
+  } else {
+    const f = Math.min(1, 6 / rs.length)      // shrink text when many pieces
+    mid = `<table class="it" style="font-size:${(2.15 * f).toFixed(2)}mm"><tr><th>DESIGN</th><th>CODE</th><th>COL</th><th>BATCH</th><th class="r">M</th></tr>
+${rs.map(r => `<tr><td dir="auto">${esc(r.design)}</td><td>${esc(r.code)}</td><td>${esc(r.color)}</td><td>${esc(r.batch)}</td><td class="r">${fmtM(r.meters)}</td></tr>`).join("")}
+<tr class="tot"><td colspan="4">TOTAL · الإجمالي</td><td class="r">${fmtM(sumM(rs))}&nbsp;m</td></tr></table>`
+  }
+  return `<div class="lbl">${head}${mid}
+<div class="f"><div class="k">CUSTOMER · العميل</div><div class="cu" dir="auto">${esc(proj.customer || proj.name)}</div></div>
+<div class="sp"></div>
+<div class="bc">${code128Svg(p.barcode ?? "")}</div><div class="code">${esc(p.barcode ?? "")}</div>
+<div class="made">MADE IN EGYPT · صنع في مصر</div>
+<div class="web">www.deebtex.com</div></div>`
 }
 function stickerCss(w: number, h: number) {
-  // sizes scale with the label height so other label sizes still look right
-  const u = h / 75
+  const u = Math.min(w / 50, h / 100)     // designed at 50 × 100 mm, scales to other sizes
+  const mm = (n: number) => `${(n * u).toFixed(2)}mm`
   return `
 @page{size:${w}mm ${h}mm;margin:0}
 body{background:#e9e9ef}
-.lbl{width:${w}mm;height:${h}mm;background:#fff;margin:10mm auto;padding:${3.2*u}mm ${3.6*u}mm ${2.4*u}mm;display:flex;flex-direction:column;overflow:hidden;page-break-after:always;break-after:page;box-shadow:0 2px 10px rgba(0,0,0,.15)}
-@media print{body{background:#fff}.lbl{margin:0;box-shadow:none}}
-.k{font-size:${1.9*u}mm;letter-spacing:.3mm;font-weight:700;color:#000;text-transform:uppercase}
-.top{display:flex;align-items:center;justify-content:space-between;border-bottom:${0.6*u}mm solid #000;padding-bottom:${1.8*u}mm}
-.logo{height:${7.2*u}mm;width:auto}
-.roll{text-align:right;border:${0.5*u}mm solid #000;border-radius:${1.4*u}mm;padding:${0.8*u}mm ${2*u}mm;min-width:${20*u}mm}
-.rn{font-size:${7.6*u}mm;font-weight:800;line-height:1}
-.mid{padding-top:${1.8*u}mm;flex:1;display:flex;flex-direction:column;min-height:0}
-.tex{font-size:${6.6*u}mm;font-weight:800;line-height:1.1;margin:${0.4*u}mm 0 ${1.6*u}mm;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.row{display:flex;gap:${3*u}mm;align-items:flex-end}
-.cell.grow{flex:1;min-width:0;border-left:${0.35*u}mm solid #000;padding-left:${3*u}mm}
-.m{font-size:${8.4*u}mm;font-weight:800;line-height:1}
-.m small{font-size:${3.6*u}mm;font-weight:700}
-.cu{font-size:${3.6*u}mm;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2}
-.bc{height:${12.5*u}mm;margin-top:${1.8*u}mm}
-.code{text-align:center;font:700 ${2.6*u}mm 'Courier New',monospace;letter-spacing:${0.8*u}mm;margin-top:${0.6*u}mm}
-.foot{margin-top:${1.2*u}mm;background:#000;color:#fff;text-align:center;font-size:${2.5*u}mm;font-weight:700;letter-spacing:.4mm;padding:${0.8*u}mm 0;border-radius:${0.8*u}mm;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.wrap{display:flex;flex-wrap:wrap;gap:8mm;justify-content:center;padding:66px 8mm 8mm}
+.lbl{width:${w}mm;height:${h}mm;background:#fff;padding:${mm(3)} ${mm(3)} ${mm(2.2)};display:flex;flex-direction:column;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.15)}
+@media print{body{background:#fff}.wrap{display:block;padding:0}.lbl{box-shadow:none;page-break-after:always;break-after:page}}
+.k{font-size:${mm(1.75)};font-weight:700;letter-spacing:.15mm;text-transform:uppercase}
+.logo{display:block;width:${mm(34)};margin:0 auto ${mm(2)}}
+.pack{border:${mm(.55)} solid #000;border-radius:${mm(1.4)};text-align:center;padding:${mm(1)} 0 ${mm(1.2)}}
+.pack .n{font-size:${mm(11)};font-weight:900;line-height:1}
+.pack .mx{font-size:${mm(1.9)};font-weight:700;margin-top:${mm(.5)}}
+.f{margin-top:${mm(1.8)}}
+.big{font-size:${mm(5.4)};font-weight:800;line-height:1.1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.v{font-size:${mm(3.6)};font-weight:800;line-height:1.15;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:${mm(1.6)} ${mm(2)};margin-top:${mm(1.8)};padding-top:${mm(1.6)};border-top:${mm(.3)} solid #000}
+.m{font-size:${mm(7)};font-weight:900;line-height:1}.m small{font-size:${mm(3)}}
+.cu{font-size:${mm(2.7)};font-weight:700;line-height:1.2}
+.sp{flex:1}
+.bc{height:${mm(11)};margin-top:${mm(1.5)}}
+.code{text-align:center;font:700 ${mm(2.3)} 'Courier New',monospace;letter-spacing:${mm(.6)};margin-top:${mm(.4)}}
+.made{margin-top:${mm(1.2)};background:#000;color:#fff;text-align:center;font-size:${mm(2.15)};font-weight:700;letter-spacing:.2mm;padding:${mm(.8)} 0;border-radius:${mm(.6)};-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.web{text-align:center;font-size:${mm(2.5)};font-weight:700;margin-top:${mm(.9)};letter-spacing:.15mm}
+table.it{width:100%;border-collapse:collapse;margin-top:${mm(1.8)};table-layout:auto}
+.it th{font-size:${mm(1.55)};text-align:left;border-bottom:${mm(.35)} solid #000;padding:${mm(.5)} ${mm(.3)};font-weight:800}
+.it td{padding:.6em .25em;border-bottom:${mm(.15)} solid #999;font-weight:600;white-space:nowrap;max-width:${mm(16)};overflow:hidden;text-overflow:ellipsis}
+.it .r{text-align:right}
+.it tr.tot td{max-width:none;border-top:${mm(.45)} solid #000;border-bottom:none;font-weight:900;font-size:1.3em;padding-top:.5em}
 `
 }
 
 // ─── COMPONENT ───────────────────────────────────────────────
 export default function RollsView({ db }: { db: SupabaseClient }) {
   const [projects,  setProjects]  = useState<Project[]>([])
+  const [packs,     setPacks]     = useState<Pack[]>([])
   const [rolls,     setRolls]     = useState<Roll[]>([])
   const [shipments, setShipments] = useState<Shipment[]>([])
   const [loading,   setLoading]   = useState(true)
@@ -176,19 +192,20 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
   const [pid,       setPid]       = useState<number | null>(() => {
     try { const v = localStorage.getItem("dtx_roll_project"); return v ? Number(v) : null } catch { return null }
   })
-  const [tab, setTab] = useState<Tab>(() => (window.innerWidth < 768 ? "scan" : "rolls"))
+  const [tab, setTab] = useState<Tab>(() => (window.innerWidth < 768 ? "scan" : "packs"))
 
   // forms
   const [projForm, setProjForm] = useState<Project | null>(null)
   const [shipForm, setShipForm] = useState<Shipment | null>(null)
   const [editRoll, setEditRoll] = useState<Roll | null>(null)
-  const [rTextile, setRTextile] = useState("")
+  const [mixPick,  setMixPick]  = useState<Set<number> | null>(null)   // "Create pack" picker
+  const [spec,     setSpec]     = useState<Spec & { batch: string }>({ design: "", code: "", color: "", batch: "" })
   const [rMeters,  setRMeters]  = useState("")
   const [rBulk,    setRBulk]    = useState("")
   const [sel,      setSel]      = useState<Set<number>>(new Set())
-  const [rollFilter, setRollFilter] = useState("")
-  const [lblW, setLblW] = useState(() => { try { return Number(localStorage.getItem("dtx_lbl_w")) || 100 } catch { return 100 } })
-  const [lblH, setLblH] = useState(() => { try { return Number(localStorage.getItem("dtx_lbl_h")) || 75 } catch { return 75 } })
+  const [filter,   setFilter]   = useState("")
+  const [lblW, setLblW] = useState(() => { try { return Number(localStorage.getItem("dtx_pack_lbl_w")) || 50 } catch { return 50 } })
+  const [lblH, setLblH] = useState(() => { try { return Number(localStorage.getItem("dtx_pack_lbl_h")) || 100 } catch { return 100 } })
 
   // scanning
   const [scanShipId, setScanShipId] = useState<number | null>(null)
@@ -199,10 +216,10 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
   const [undoStack, setUndoStack] = useState<number[]>([])
   const scannerRef = useRef<H5Scanner | null>(null)
   const lastScan   = useRef<{ code: string; t: number }>({ code: "", t: 0 })
-  const live       = useRef<{ rolls: Roll[]; shipments: Shipment[]; scanShipId: number | null }>({ rolls, shipments, scanShipId })
+  const live       = useRef<{ packs: Pack[]; rolls: Roll[]; shipments: Shipment[]; scanShipId: number | null }>({ packs, rolls, shipments, scanShipId })
 
   useEffect(() => { try { if (pid) localStorage.setItem("dtx_roll_project", String(pid)) } catch { /* ignore */ } }, [pid])
-  useEffect(() => { try { localStorage.setItem("dtx_lbl_w", String(lblW)); localStorage.setItem("dtx_lbl_h", String(lblH)) } catch { /* ignore */ } }, [lblW, lblH])
+  useEffect(() => { try { localStorage.setItem("dtx_pack_lbl_w", String(lblW)); localStorage.setItem("dtx_pack_lbl_h", String(lblH)) } catch { /* ignore */ } }, [lblW, lblH])
 
   // ── LOAD + REALTIME ──
   useEffect(() => {
@@ -218,11 +235,10 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
       return out
     }
     ;(async () => {
-      const [p, r, s] = await Promise.all([
-        loadAll("roll_projects", sanProject), loadAll("rolls", sanRoll), loadAll("shipments", sanShipment)])
-      setProjects(p); setRolls(r); setShipments(s); setLoading(false)
+      const [p, k, r, s] = await Promise.all([loadAll("roll_projects", sanProject), loadAll("packs", sanPack),
+        loadAll("rolls", sanRoll), loadAll("shipments", sanShipment)])
+      setProjects(p); setPacks(k); setRolls(r); setShipments(s); setLoading(false)
     })()
-
     function merge<T extends { id: number }>(set: React.Dispatch<React.SetStateAction<T[]>>, san: (r: Record<string, unknown>) => T) {
       return (payload: { eventType: string; new: unknown; old: unknown }) => {
         if (payload.eventType === "DELETE") {
@@ -233,132 +249,180 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
         set(p => p.some(x => x.id === row.id) ? p.map(x => x.id === row.id ? row : x) : [...p, row])
       }
     }
-    const ch = db.channel("deebtex-rolls")
+    const ch = db.channel("deebtex-packs")
       .on("postgres_changes", { event: "*", schema: "public", table: "roll_projects" }, merge(setProjects, sanProject))
+      .on("postgres_changes", { event: "*", schema: "public", table: "packs" },         merge(setPacks, sanPack))
       .on("postgres_changes", { event: "*", schema: "public", table: "rolls" },         merge(setRolls, sanRoll))
       .on("postgres_changes", { event: "*", schema: "public", table: "shipments" },     merge(setShipments, sanShipment))
       .subscribe()
     return () => { db.removeChannel(ch) }
   }, [db])
-
-  // stop camera when leaving
   useEffect(() => () => { stopCam() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── DB WRITE (visible errors) ──
-  async function save(table: string, row: object): Promise<boolean> {
-    const { error } = await db.from(table).upsert(row as Record<string, unknown>, { onConflict: "id" })
-    if (error) { setErr(`Save failed (${table}): ${error.message} — check your internet and try again.`); return false }
+  // ── DB WRITES (errors are shown, never silent) ──
+  async function run(p: PromiseLike<{ error: { message: string } | null }>, what: string): Promise<boolean> {
+    const { error } = await p
+    if (error) { setErr(`${what} failed: ${error.message} — check your internet and try again.`); return false }
     return true
   }
-  async function remove(table: string, id: number): Promise<boolean> {
-    const { error } = await db.from(table).delete().eq("id", id)
-    if (error) { setErr(`Delete failed (${table}): ${error.message}`); return false }
-    return true
-  }
+  const save = (table: string, row: object) => run(db.from(table).upsert(row as Record<string, unknown>, { onConflict: "id" }), `Saving ${table}`)
 
   // ── DERIVED ──
-  const project   = projects.find(p => p.id === pid) ?? null
-  const pRolls    = useMemo(() => rolls.filter(r => r.projectId === pid).sort((a, b) => a.rollNo - b.rollNo), [rolls, pid])
-  const pShips    = useMemo(() => shipments.filter(s => s.projectId === pid).sort((a, b) => a.number - b.number), [shipments, pid])
-  const textileNames = useMemo(() => {
-    const m = new Map<string, string>()
-    for (const t of project?.targets ?? []) m.set(norm(t.textile), t.textile)
-    for (const r of pRolls) if (!m.has(norm(r.textile))) m.set(norm(r.textile), r.textile)
+  const project = projects.find(p => p.id === pid) ?? null
+  const pPacks  = useMemo(() => packs.filter(k => k.projectId === pid), [packs, pid])
+  const pRolls  = useMemo(() => rolls.filter(r => r.projectId === pid), [rolls, pid])
+  const pShips  = useMemo(() => shipments.filter(s => s.projectId === pid).sort((a, b) => a.number - b.number), [shipments, pid])
+  const byPack  = useMemo(() => {
+    const m = new Map<number, Roll[]>()
+    for (const r of rolls) { if (!m.has(r.packId)) m.set(r.packId, []); m.get(r.packId)!.push(r) }
+    for (const list of m.values()) list.sort((a, b) => a.id - b.id)
+    return m
+  }, [rolls])
+  const rollsOf = (k: Pack) => byPack.get(k.id) ?? []
+  const packOrder = (a: Pack, b: Pack) =>
+    (a.packNo ?? 1e9) - (b.packNo ?? 1e9) || (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id - b.id
+  const sortedPacks = [...pPacks].sort(packOrder)
+
+  // order lines (from the project + anything added that isn't in it)
+  const specs = useMemo(() => {
+    const m = new Map<string, Spec>()
+    for (const t of project?.targets ?? []) m.set(keyOf(t), { design: t.design, code: t.code, color: t.color })
+    for (const r of pRolls) if (!m.has(keyOf(r))) m.set(keyOf(r), { design: r.design, code: r.code, color: r.color })
     return [...m.values()]
   }, [project, pRolls])
-
-  function progress(rollsIn: Roll[]) {
-    // per textile: ordered / made / loaded (in any shipment)
-    return textileNames.map(name => {
-      const ordered = project?.targets.find(t => norm(t.textile) === norm(name))?.meters ?? 0
-      const live_ = rollsIn.filter(r => !r.voided && norm(r.textile) === norm(name))
-      const made   = live_.reduce((s, r) => s + r.meters, 0)
-      const loaded = live_.filter(r => r.shipmentId != null).reduce((s, r) => s + r.meters, 0)
-      return { name, ordered, made, loaded, rolls: live_.length }
-    })
-  }
-  const prog = progress(pRolls)
+  const packOf = useMemo(() => new Map(packs.map(k => [k.id, k])), [packs])
+  const prog = specs.map(s => {
+    const ordered = project?.targets.find(t => keyOf(t) === keyOf(s))?.meters ?? 0
+    const rs = pRolls.filter(r => keyOf(r) === keyOf(s) && !packOf.get(r.packId)?.voided)
+    return { ...s, ordered, made: sumM(rs), shipped: sumM(rs.filter(r => packOf.get(r.packId)?.shipmentId != null)) }
+  })
 
   // ── PROJECTS ──
-  function blankProject(): Project { return { id: 0, name: "", customer: "", targets: [{ textile: "", meters: 0 }], notes: "", closed: false } }
+  const blankLine = (): Line => ({ design: "", code: "", color: "", meters: 0 })
   async function saveProject() {
     if (!projForm || !projForm.name.trim()) return
     const row: Project = { ...projForm, id: projForm.id || newId(),
-      targets: projForm.targets.filter(t => t.textile.trim()).map(t => ({ textile: t.textile.trim(), meters: Number(t.meters) || 0 })) }
+      targets: projForm.targets.filter(t => t.design.trim()).map(t => ({ design: t.design.trim(), code: t.code.trim(), color: t.color.trim(), meters: Number(t.meters) || 0 })) }
     if (await save("roll_projects", row)) {
       setProjects(p => p.some(x => x.id === row.id) ? p.map(x => x.id === row.id ? row : x) : [...p, row])
       setPid(row.id); setProjForm(null)
     }
   }
   async function deleteProject(p: Project) {
-    const nR = rolls.filter(r => r.projectId === p.id).length
+    const nK = packs.filter(k => k.projectId === p.id).length
     const nS = shipments.filter(s => s.projectId === p.id).length
-    if (nR || nS) { alert(`"${p.name}" has ${nR} rolls and ${nS} shipments.\nDelete those first — a project with rolls can't be deleted.`); return }
+    if (nK || nS) { alert(`"${p.name}" has ${nK} packs and ${nS} shipments.\nDelete those first — a project with packs can't be deleted.`); return }
     if (!window.confirm(`Delete project "${p.name}"?\n\nThis cannot be undone.`)) return
-    if (await remove("roll_projects", p.id)) { setProjects(x => x.filter(y => y.id !== p.id)); setPid(null) }
+    if (await run(db.from("roll_projects").delete().eq("id", p.id), "Delete")) { setProjects(x => x.filter(y => y.id !== p.id)); setPid(null) }
   }
 
-  // ── ROLLS ──
-  function nextCodeNum() {
-    let max = 0
-    for (const r of rolls) { const n = Number(r.code.replace(/\D/g, "")); if (n > max) max = n }
-    return max + 1
-  }
+  // ── ADD ROLLS (each roll starts as its own pack) ──
   async function addRolls(metersList: number[]) {
     if (!project) return
-    const textile = rTextile.trim()
-    if (!textile) { setErr("Pick the textile first."); return }
+    if (!spec.design.trim()) { setErr("Pick or type the design first."); return }
     const good = metersList.filter(m => m > 0)
     if (!good.length) return
-    let rollNo = pRolls.reduce((m, r) => Math.max(m, r.rollNo), 0)
-    let codeN  = nextCodeNum()
-    const created: Roll[] = good.map(m => ({
-      id: newId(), code: `DTX${String(codeN++).padStart(6, "0")}`, projectId: project.id,
-      rollNo: ++rollNo, textile, meters: m, voided: false, shipmentId: null, printed: false,
-    }))
-    const { error } = await db.from("rolls").insert(created)
-    if (error) { setErr(`Couldn't add rolls: ${error.message}`); return }
-    setRolls(p => [...p, ...created.filter(c => !p.some(x => x.id === c.id))])
+    const now = Date.now()
+    const newPacks: Pack[] = [], newRolls: Roll[] = []
+    good.forEach((m, i) => {
+      const k: Pack = { id: newId(), projectId: project.id, packNo: null, barcode: null, printed: false, voided: false, shipmentId: null,
+        createdAt: new Date(now + i).toISOString() }
+      newPacks.push(k)
+      newRolls.push({ id: newId(), projectId: project.id, packId: k.id, design: spec.design.trim(), code: spec.code.trim(),
+        color: spec.color.trim(), batch: spec.batch.trim(), meters: m })
+    })
+    if (!await run(db.from("packs").insert(newPacks), "Adding packs")) return
+    if (!await run(db.from("rolls").insert(newRolls), "Adding rolls")) { await db.from("packs").delete().in("id", newPacks.map(k => k.id)); return }
+    setPacks(p => [...p, ...newPacks.filter(n => !p.some(x => x.id === n.id))])
+    setRolls(p => [...p, ...newRolls.filter(n => !p.some(x => x.id === n.id))])
     setRMeters(""); setRBulk(""); setErr("")
   }
+
+  // ── MIXED PACKS ──
+  const canMix = (k: Pack) => !k.printed && k.packNo == null && !k.voided && k.shipmentId == null && rollsOf(k).length === 1
+  async function createMixed(ids: number[]) {
+    if (!project || ids.length < 2) return
+    const k: Pack = { id: newId(), projectId: project.id, packNo: null, barcode: null, printed: false, voided: false, shipmentId: null,
+      createdAt: new Date().toISOString() }
+    if (!await run(db.from("packs").insert(k), "Creating pack")) return
+    if (!await run(db.from("rolls").update({ packId: k.id }).in("packId", ids), "Moving rolls")) return
+    await run(db.from("packs").delete().in("id", ids), "Cleaning up")
+    setPacks(p => [...p.filter(x => !ids.includes(x.id)), k])
+    setRolls(p => p.map(r => ids.includes(r.packId) ? { ...r, packId: k.id } : r))
+    setMixPick(null)
+  }
+  async function unpack(k: Pack) {
+    if (k.printed || k.packNo != null) { alert(`Pack ${k.packNo} already has a printed sticker.\nCancel it instead (⛔), then pack the rolls again.`); return }
+    if (!window.confirm("Split this mixed pack back into separate rolls?")) return
+    const rs = rollsOf(k)
+    const singles: Pack[] = rs.map((_, i) => ({ id: newId(), projectId: k.projectId, packNo: null, barcode: null, printed: false, voided: false,
+      shipmentId: null, createdAt: new Date(Date.now() + i).toISOString() }))
+    if (!await run(db.from("packs").insert(singles), "Unpacking")) return
+    for (let i = 0; i < rs.length; i++) await run(db.from("rolls").update({ packId: singles[i].id }).eq("id", rs[i].id), "Unpacking")
+    await run(db.from("packs").delete().eq("id", k.id), "Unpacking")
+    setPacks(p => [...p.filter(x => x.id !== k.id), ...singles])
+    setRolls(p => p.map(r => { const i = rs.findIndex(x => x.id === r.id); return i >= 0 ? { ...r, packId: singles[i].id } : r }))
+  }
+
+  // ── EDIT / CANCEL / DELETE ──
   async function saveEditRoll() {
     if (!editRoll) return
-    const orig = rolls.find(r => r.id === editRoll.id)
-    const changed = orig && (orig.meters !== editRoll.meters || orig.textile !== editRoll.textile)
-    const row = { ...editRoll, textile: editRoll.textile.trim(), printed: changed ? false : editRoll.printed }
-    if (await save("rolls", row)) { setRolls(p => p.map(x => x.id === row.id ? row : x)); setEditRoll(null) }
+    const row = { ...editRoll, design: editRoll.design.trim(), code: editRoll.code.trim(), color: editRoll.color.trim(), batch: editRoll.batch.trim() }
+    if (!await save("rolls", row)) return
+    setRolls(p => p.map(x => x.id === row.id ? row : x))
+    const k = packOf.get(row.packId)
+    if (k?.printed) {   // sticker is now out of date → reprint (same number & barcode)
+      await run(db.from("packs").update({ printed: false }).eq("id", k.id), "Saving")
+      setPacks(p => p.map(x => x.id === k.id ? { ...x, printed: false } : x))
+    }
+    setEditRoll(null)
   }
-  async function toggleVoid(r: Roll) {
-    if (r.shipmentId != null) { alert("This roll is already loaded in a shipment. Remove it from the shipment first."); return }
-    if (!r.voided && !window.confirm(`Cancel roll #${r.rollNo} (${r.textile} · ${fmtM(r.meters)}m)?\n\nIts sticker will be refused when scanned. You can bring it back later.`)) return
-    const row = { ...r, voided: !r.voided }
-    if (await save("rolls", row)) setRolls(p => p.map(x => x.id === r.id ? row : x))
+  async function toggleVoid(k: Pack) {
+    if (k.shipmentId != null) { alert("This pack is already loaded in a shipment. Remove it from the shipment first."); return }
+    if (!k.voided && !window.confirm(`Cancel pack ${k.packNo ?? "(not printed)"} — ${fmtM(sumM(rollsOf(k)))}m?\n\nIts sticker will be refused when scanned. You can bring it back later.`)) return
+    if (await run(db.from("packs").update({ voided: !k.voided }).eq("id", k.id), "Saving")) setPacks(p => p.map(x => x.id === k.id ? { ...x, voided: !k.voided } : x))
   }
-  async function deleteRoll(r: Roll) {
-    if (r.shipmentId != null) { alert("This roll is loaded in a shipment — remove it from the shipment first."); return }
-    if (!window.confirm(`Delete roll #${r.rollNo} (${r.textile} · ${fmtM(r.meters)}m, ${r.code})?\n\nIf a sticker was already printed for it, use "Cancel roll" instead so the sticker gets refused when scanned.\n\nThis cannot be undone.`)) return
-    if (await remove("rolls", r.id)) { setRolls(p => p.filter(x => x.id !== r.id)); setSel(s => { const n = new Set(s); n.delete(r.id); return n }) }
+  async function deletePack(k: Pack) {
+    if (k.shipmentId != null) { alert("This pack is loaded in a shipment — remove it from the shipment first."); return }
+    const rs = rollsOf(k)
+    const warn = k.packNo != null ? `\n\n⚠️ A sticker was already printed for pack ${k.packNo}. If it's stuck on a roll, use "Cancel" (⛔) instead, so it gets refused when scanned.` : ""
+    if (!window.confirm(`Delete ${rs.length > 1 ? `mixed pack (${rs.length} rolls)` : `roll ${rs[0] ? specLabel(rs[0]) : ""}`} · ${fmtM(sumM(rs))}m?${warn}\n\nThis cannot be undone.`)) return
+    if (!await run(db.from("rolls").delete().eq("packId", k.id), "Delete")) return
+    if (!await run(db.from("packs").delete().eq("id", k.id), "Delete")) return
+    setRolls(p => p.filter(r => r.packId !== k.id)); setPacks(p => p.filter(x => x.id !== k.id))
+    setSel(s => { const n = new Set(s); n.delete(k.id); return n })
   }
-  async function printStickers(list: Roll[]) {
-    if (!project || !list.length) return
-    openPrint(`Stickers — ${project.name} (${list.length})`,
-      list.map(r => stickerHtml(r, project)).join(""), stickerCss(lblW, lblH))
-    const ids = new Set(list.filter(r => !r.printed).map(r => r.id))
-    if (!ids.size) return
-    const { error } = await db.from("rolls").update({ printed: true }).in("id", [...ids])
-    if (!error) setRolls(p => p.map(r => ids.has(r.id) ? { ...r, printed: true } : r))
+
+  // ── PRINT (pack numbers + barcodes are given here, in order) ──
+  async function printPacks(list: Pack[]) {
+    if (!project) return
+    const todo = list.filter(k => !k.voided && rollsOf(k).length).sort(packOrder)
+    if (!todo.length) return
+    const w = openBlank(); if (!w) return
+    let nextNo = pPacks.reduce((m, k) => Math.max(m, k.packNo ?? 0), 0) + 1
+    let nextBc = packs.reduce((m, k) => Math.max(m, Number(k.barcode) || 0), 0) + 1
+    const ready: Pack[] = []
+    for (const k of todo) {
+      const upd: Pack = k.packNo != null && k.barcode ? { ...k, printed: true }
+        : { ...k, packNo: nextNo++, barcode: String(nextBc++).padStart(8, "0"), printed: true }
+      if (!await run(db.from("packs").update({ packNo: upd.packNo, barcode: upd.barcode, printed: true }).eq("id", k.id), "Numbering packs")) { w.close(); return }
+      ready.push(upd)
+    }
+    setPacks(p => p.map(x => ready.find(r => r.id === x.id) ?? x))
+    writeTo(w, printPage(`Stickers — ${project.name} (${ready.length})`,
+      ready.map(k => stickerHtml(k, rollsOf(k), project)).join(""), stickerCss(lblW, lblH)))
   }
 
   // ── SHIPMENTS ──
   function newShipmentDraft(): Shipment {
-    const plan = prog.map(x => ({ textile: x.name, meters: Math.max(0, x.ordered - x.loaded) })).filter(x => x.meters > 0)
+    const plan = prog.map(x => ({ design: x.design, code: x.code, color: x.color, meters: Math.max(0, x.ordered - x.shipped) })).filter(x => x.meters > 0)
     return { id: 0, projectId: pid ?? 0, number: pShips.reduce((m, s) => Math.max(m, s.number), 0) + 1,
       date: today(), truck: "", driver: "", notes: "", status: "open", plan }
   }
   async function saveShipment() {
     if (!shipForm || !pid) return
     const row: Shipment = { ...shipForm, id: shipForm.id || newId(), projectId: pid,
-      plan: shipForm.plan.filter(l => l.textile.trim()).map(l => ({ textile: l.textile.trim(), meters: Number(l.meters) || 0 })) }
+      plan: shipForm.plan.filter(l => l.design.trim()).map(l => ({ design: l.design.trim(), code: l.code.trim(), color: l.color.trim(), meters: Number(l.meters) || 0 })) }
     if (await save("shipments", row)) {
       setShipments(p => p.some(x => x.id === row.id) ? p.map(x => x.id === row.id ? row : x) : [...p, row])
       if (!shipForm.id) { setScanShipId(row.id); setTab("scan") }
@@ -366,30 +430,32 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     }
   }
   async function deleteShipment(s: Shipment) {
-    const n = rolls.filter(r => r.shipmentId === s.id).length
-    if (n) { alert(`Shipment ${s.number} has ${n} rolls loaded. Remove them first (or keep the shipment).`); return }
+    const n = packs.filter(k => k.shipmentId === s.id).length
+    if (n) { alert(`Shipment ${s.number} has ${n} packs loaded. Remove them first (or keep the shipment).`); return }
     if (!window.confirm(`Delete empty shipment ${s.number} (${s.date})?\n\nThis cannot be undone.`)) return
-    if (await remove("shipments", s.id)) setShipments(p => p.filter(x => x.id !== s.id))
+    if (await run(db.from("shipments").delete().eq("id", s.id), "Delete")) setShipments(p => p.filter(x => x.id !== s.id))
   }
   function shipStats(s: Shipment) {
-    const sr = rolls.filter(r => r.shipmentId === s.id)
-    const names = new Map<string, string>()
-    for (const l of s.plan) names.set(norm(l.textile), l.textile)
-    for (const r of sr) if (!names.has(norm(r.textile))) names.set(norm(r.textile), r.textile)
-    const lines = [...names.values()].map(name => {
-      const rr = sr.filter(r => norm(r.textile) === norm(name))
-      return { name, plan: s.plan.find(l => norm(l.textile) === norm(name))?.meters ?? 0,
-        loaded: rr.reduce((a, r) => a + r.meters, 0), rolls: rr.length }
+    const sp = packs.filter(k => k.shipmentId === s.id).sort(packOrder)
+    const rs = sp.flatMap(k => rollsOf(k))
+    const m = new Map<string, Spec>()
+    for (const l of s.plan) m.set(keyOf(l), l)
+    for (const r of rs) if (!m.has(keyOf(r))) m.set(keyOf(r), r)
+    const lines = [...m.values()].map(x => {
+      const rr = rs.filter(r => keyOf(r) === keyOf(x))
+      return { design: x.design, code: x.code, color: x.color,
+        plan: s.plan.find(l => keyOf(l) === keyOf(x))?.meters ?? 0,
+        loaded: sumM(rr), packs: new Set(rr.map(r => r.packId)).size }
     })
-    return { rolls: sr, lines, meters: sr.reduce((a, r) => a + r.meters, 0) }
+    return { packs: sp, rolls: rs, lines, meters: sumM(rs) }
   }
   async function setShipStatus(s: Shipment, status: "open" | "closed") {
     if (status === "closed") {
       const st = shipStats(s)
       const short = st.lines.filter(l => l.plan > 0 && l.loaded < l.plan)
       const msg = short.length
-        ? `⚠️ Less than planned is loaded:\n${short.map(l => `• ${l.name}: ${fmtM(l.loaded)} / ${fmtM(l.plan)}m`).join("\n")}\n\nClose shipment ${s.number} anyway?`
-        : `Close shipment ${s.number}? (${st.rolls.length} rolls · ${fmtM(st.meters)}m)`
+        ? `⚠️ Less than planned is loaded:\n${short.map(l => `• ${specLabel(l)}: ${fmtM(l.loaded)} / ${fmtM(l.plan)}m`).join("\n")}\n\nClose shipment ${s.number} anyway?`
+        : `Close shipment ${s.number}? (${st.packs.length} packs · ${fmtM(st.meters)}m)`
       if (!window.confirm(msg)) return
     }
     const row = { ...s, status, closedAt: status === "closed" ? new Date().toISOString() : null }
@@ -408,54 +474,52 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     try { navigator.vibrate?.(ok ? 80 : [200, 80, 200]) } catch { /* ignore */ }
   }
   function say(ok: boolean, msg: string) { setFeedback({ ok, msg, t: Date.now() }); beep(ok) }
+  function packText(k: Pack, rs: Roll[]) {
+    return rs.length > 1 ? `Pack ${k.packNo} · mixed ${rs.length} pieces · ${fmtM(sumM(rs))}m` : `Pack ${k.packNo} · ${rs[0] ? specLabel(rs[0]) : ""} · ${fmtM(sumM(rs))}m`
+  }
 
   async function processCode(raw: string) {
-    const code = raw.trim().toUpperCase().replace(/\s+/g, "")
+    const code = raw.trim().replace(/\s+/g, "")
     if (!code) return
     const now = Date.now()
     if (code === lastScan.current.code && now - lastScan.current.t < 2500) return   // camera sees the same sticker many times
     lastScan.current = { code, t: now }
-    const { rolls: R, shipments: SH, scanShipId: sid } = live.current
+    const { packs: K, rolls: R, shipments: SH, scanShipId: sid } = live.current
     const ship = SH.find(s => s.id === sid)
     if (!ship) return say(false, "Pick or create a shipment first")
-    if (ship.status === "closed") return say(false, `Shipment ${ship.number} is closed — reopen it to add rolls`)
-    const roll = R.find(r => r.code === code)
-    if (!roll) return say(false, `Unknown sticker: ${code}`)
-    if (roll.projectId !== ship.projectId) {
-      const other = projects.find(p => p.id === roll.projectId)
-      return say(false, `Roll belongs to another project${other ? ` (${other.name})` : ""} — don't load it`)
+    if (ship.status === "closed") return say(false, `Shipment ${ship.number} is closed — reopen it to add packs`)
+    const k = K.find(x => x.barcode === code)
+    if (!k) return say(false, `Unknown sticker: ${code}`)
+    const rs = R.filter(r => r.packId === k.id)
+    if (k.projectId !== ship.projectId) {
+      const other = projects.find(p => p.id === k.projectId)
+      return say(false, `This pack belongs to another project${other ? ` (${other.name})` : ""} — don't load it`)
     }
-    if (roll.voided) return say(false, `Roll #${roll.rollNo} was CANCELLED — don't load it`)
-    if (roll.shipmentId === ship.id) return say(false, `Already scanned: roll #${roll.rollNo}`)
-    if (roll.shipmentId != null) {
-      const other = SH.find(s => s.id === roll.shipmentId)
-      return say(false, `Roll #${roll.rollNo} was already shipped in shipment ${other?.number ?? "?"}`)
-    }
-    const row = { ...roll, shipmentId: ship.id }
-    setRolls(p => p.map(x => x.id === roll.id ? row : x))
-    const { error } = await db.from("rolls").update({ shipmentId: ship.id }).eq("id", roll.id)
+    if (k.voided) return say(false, `Pack ${k.packNo} was CANCELLED — don't load it`)
+    if (k.shipmentId === ship.id) return say(false, `Already scanned: pack ${k.packNo}`)
+    if (k.shipmentId != null) return say(false, `Pack ${k.packNo} was already shipped in shipment ${SH.find(s => s.id === k.shipmentId)?.number ?? "?"}`)
+    setPacks(p => p.map(x => x.id === k.id ? { ...x, shipmentId: ship.id } : x))
+    const { error } = await db.from("packs").update({ shipmentId: ship.id }).eq("id", k.id)
     if (error) {
-      setRolls(p => p.map(x => x.id === roll.id ? roll : x))
+      setPacks(p => p.map(x => x.id === k.id ? k : x))
       return say(false, `Not saved — check internet. (${error.message})`)
     }
-    setUndoStack(u => [...u, roll.id])
-    say(true, `✓ Roll #${roll.rollNo} · ${roll.textile} · ${fmtM(roll.meters)}m`)
+    setUndoStack(u => [...u, k.id])
+    say(true, `✓ ${packText(k, rs)}`)
   }
-  async function unload(r: Roll) {
-    const row = { ...r, shipmentId: null }
-    setRolls(p => p.map(x => x.id === r.id ? row : x))
-    const { error } = await db.from("rolls").update({ shipmentId: null }).eq("id", r.id)
-    if (error) { setRolls(p => p.map(x => x.id === r.id ? r : x)); setErr(`Couldn't remove: ${error.message}`); return }
-    setUndoStack(u => u.filter(id => id !== r.id))
+  async function unload(k: Pack) {
+    setPacks(p => p.map(x => x.id === k.id ? { ...x, shipmentId: null } : x))
+    const { error } = await db.from("packs").update({ shipmentId: null }).eq("id", k.id)
+    if (error) { setPacks(p => p.map(x => x.id === k.id ? k : x)); setErr(`Couldn't remove: ${error.message}`); return }
+    setUndoStack(u => u.filter(id => id !== k.id))
     lastScan.current = { code: "", t: 0 }
   }
   async function undoLast() {
     const id = undoStack[undoStack.length - 1]
-    const r = rolls.find(x => x.id === id)
-    if (r && r.shipmentId != null) { await unload(r); say(true, `↩ Removed roll #${r.rollNo} from the truck`) }
+    const k = packs.find(x => x.id === id)
+    if (k && k.shipmentId != null) { await unload(k); say(true, `↩ Removed pack ${k.packNo} from the truck`) }
     else setUndoStack(u => u.slice(0, -1))
   }
-
   async function loadLib(): Promise<H5Global> {
     const w = window as unknown as H5Global
     if (!w.Html5Qrcode) {
@@ -473,10 +537,8 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
     try {
       const lib = await loadLib()
       const F = lib.Html5QrcodeSupportedFormats
-      const sc = new lib.Html5Qrcode("dtx-reader", {
-        formatsToSupport: [F.CODE_128], verbose: false,
-        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-      })
+      const sc = new lib.Html5Qrcode("dtx-reader", { formatsToSupport: [F.CODE_128], verbose: false,
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true } })
       scannerRef.current = sc
       await sc.start({ facingMode: "environment" },
         { fps: 12, qrbox: (vw: number, vh: number) => ({ width: Math.floor(vw * 0.9), height: Math.floor(Math.min(vh * 0.45, vw * 0.35)) }) },
@@ -484,106 +546,100 @@ export default function RollsView({ db }: { db: SupabaseClient }) {
       setCamOn(true)
     } catch (e) {
       scannerRef.current = null
-      setCamErr(String(e instanceof Error ? e.message : e).includes("Permission")
+      const m = e instanceof Error ? e.message : String(e)
+      setCamErr(/permission|notallowed/i.test(m)
         ? "Camera permission was refused. Allow camera access for this site in the browser settings, then try again."
-        : `Camera couldn't start: ${e instanceof Error ? e.message : String(e)}`)
+        : `Camera couldn't start: ${m}`)
     }
   }
   async function stopCam() {
     const sc = scannerRef.current
-    scannerRef.current = null
-    setCamOn(false)
+    scannerRef.current = null; setCamOn(false)
     if (sc) { try { await sc.stop(); sc.clear() } catch { /* already stopped */ } }
   }
 
-  // ── DOCUMENTS ──
-  function docHeader(titleEn: string, titleAr: string, s: Shipment) {
-    const p = project!
-    return `<div class="hd">
-  <img src="${LOGO}" class="lg"/>
-  <div class="tt"><div class="en">${titleEn}</div><div class="ar">${titleAr}</div></div>
-</div>
-<table class="meta">
-  <tr><th>Shipment No. · رقم الشحنة</th><td>${s.number}</td><th>Date · التاريخ</th><td>${esc(s.date)}</td></tr>
-  <tr><th>Customer · العميل</th><td dir="auto">${esc(p.customer || "—")}</td><th>Project · المشروع</th><td dir="auto">${esc(p.name)}</td></tr>
-  <tr><th>Truck No. · رقم السيارة</th><td dir="auto">${esc(s.truck || "—")}</td><th>Driver · السائق</th><td dir="auto">${esc(s.driver || "—")}</td></tr>
-</table>`
-  }
-  const docCss = `
-.page{max-width:190mm;margin:0 auto;padding:12mm 10mm;font-size:12px}
-@page{size:A4;margin:10mm}
-@media print{.page{padding:0;max-width:none}}
-.hd{display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #000;padding-bottom:10px;margin-bottom:12px}
-.lg{height:30px}
-.tt{text-align:right}.tt .en{font-size:20px;font-weight:800;letter-spacing:1px}.tt .ar{font-size:18px;font-weight:700}
-table{width:100%;border-collapse:collapse}
-.meta{margin-bottom:14px}.meta th{text-align:left;background:#f2f2f2;width:22%;font-size:11px}
-.meta th,.meta td{border:1px solid #bbb;padding:6px 8px}
-.list th{background:#222;color:#fff;padding:7px 8px;font-size:11px;text-align:left;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-.list td{border-bottom:1px solid #ddd;padding:6px 8px}
-.list th.num{text-align:right}
-.list tr.sub td{background:#f2f2f2;font-weight:700;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-.list tr.tot td{border-top:2px solid #000;font-weight:800;font-size:13px}
-.num{text-align:right;font-variant-numeric:tabular-nums}
-h3{font-size:13px;margin:16px 0 6px}
-.chips{display:flex;flex-wrap:wrap;gap:4px}.chips span{border:1px solid #bbb;border-radius:4px;padding:2px 6px;font-size:11px}
-.sig{display:flex;justify-content:space-between;margin-top:40px;gap:20px}
-.sig div{flex:1;text-align:center;font-size:11px}.sig .ln{border-bottom:1px solid #000;height:36px;margin-bottom:6px}
-.foot{margin-top:24px;border-top:1px solid #bbb;padding-top:8px;font-size:10px;color:#444;display:flex;justify-content:space-between}
-.made{font-weight:800;letter-spacing:1px}
-`
-  function groupByTextile(list: Roll[]) {
-    const g = new Map<string, { name: string; rolls: Roll[] }>()
-    for (const r of [...list].sort((a, b) => a.rollNo - b.rollNo)) {
-      const k = norm(r.textile)
-      if (!g.has(k)) g.set(k, { name: r.textile, rolls: [] })
-      g.get(k)!.rolls.push(r)
-    }
-    return [...g.values()]
-  }
-  function exportDeliveryNote(s: Shipment) {
-    const st = shipStats(s); const groups = groupByTextile(st.rolls)
-    const summary = groups.map(g => `<tr><td dir="auto">${esc(g.name)}</td><td class="num">${g.rolls.length}</td><td class="num">${fmtM(g.rolls.reduce((a, r) => a + r.meters, 0))} m</td></tr>`).join("")
-    const detail = groups.map(g => `<h3 dir="auto">${esc(g.name)} — ${g.rolls.length} rolls · رول</h3>
-<div class="chips">${g.rolls.map(r => `<span>#${r.rollNo} · ${fmtM(r.meters)}m</span>`).join("")}</div>`).join("")
-    openPrint(`Delivery Note — Shipment ${s.number}`, `<div class="page">
-${docHeader("DELIVERY NOTE", "إذن تسليم", s)}
-<table class="list"><tr><th>Textile · القماش</th><th class="num">Rolls · عدد الرولات</th><th class="num">Meters · الأمتار</th></tr>
-${summary}
-<tr class="tot"><td>TOTAL · الإجمالي</td><td class="num">${st.rolls.length}</td><td class="num">${fmtM(st.meters)} m</td></tr></table>
-${detail}
-<div class="sig"><div><div class="ln"></div>Delivered by (Deebtex) · المسلِّم</div><div><div class="ln"></div>Driver · السائق</div><div><div class="ln"></div>Received by · المستلِم</div></div>
-<div class="foot"><span>Deebtex · Alexandria, Egypt</span><span class="made">MADE IN EGYPT · صنع في مصر</span></div>
-</div>`, docCss)
-  }
+  // ── PACKING LIST ──
   function exportPackingList(s: Shipment) {
-    const st = shipStats(s); const groups = groupByTextile(st.rolls)
-    let i = 0
-    const body = groups.map(g => {
-      const rowsHtml = g.rolls.map(r => `<tr><td>${++i}</td><td>${r.rollNo}</td><td style="font-family:'Courier New',monospace">${r.code}</td><td dir="auto">${esc(r.textile)}</td><td>140 cm</td><td class="num">${fmtM(r.meters)}</td></tr>`).join("")
-      return rowsHtml + `<tr class="sub"><td colspan="3"></td><td dir="auto">Subtotal · إجمالي ${esc(g.name)}</td><td>${g.rolls.length} rolls</td><td class="num">${fmtM(g.rolls.reduce((a, r) => a + r.meters, 0))}</td></tr>`
+    const w = openBlank(); if (!w || !project) return
+    const st = shipStats(s)
+    const body = st.packs.map(k => {
+      const rs = rollsOf(k), mixed = rs.length > 1
+      const rows = rs.map((r, i) => `<tr class="${i === 0 ? "first" : ""}">${i === 0
+        ? `<td rowspan="${rs.length + (mixed ? 1 : 0)}" class="pn">${k.packNo ?? "—"}${mixed ? "<div class=mxt>mixed</div>" : ""}</td>` : ""}
+<td dir="auto">${esc(r.design)}</td><td>${esc(r.code)}</td><td>${esc(r.color)}</td><td class="num">${fmtM(r.meters)}</td></tr>`).join("")
+      return rows + (mixed ? `<tr class="ptot"><td colspan="3">Pack ${k.packNo} total · إجمالي الطرد</td><td class="num">${fmtM(sumM(rs))}</td></tr>` : "")
     }).join("")
-    openPrint(`Packing List — Shipment ${s.number}`, `<div class="page">
-${docHeader("PACKING LIST", "قائمة التعبئة", s)}
-<table class="list">
-<tr><th>#</th><th>Roll No. · رقم الرول</th><th>Barcode · الباركود</th><th>Textile · القماش</th><th>Width · العرض</th><th class="num">Meters · الأمتار</th></tr>
-${body}
-<tr class="tot"><td colspan="4">GRAND TOTAL · الإجمالي الكلي</td><td>${st.rolls.length} rolls · رول</td><td class="num">${fmtM(st.meters)} m</td></tr>
-</table>
-<div class="sig"><div><div class="ln"></div>Packed by · تم التعبئة بواسطة</div><div><div class="ln"></div>Checked by · تمت المراجعة بواسطة</div></div>
-<div class="foot"><span>Exporter · المصدِّر: Deebtex · Alexandria, Egypt</span><span class="made">MADE IN EGYPT · صنع في مصر</span></div>
-</div>`, docCss)
+    const summary = st.lines.filter(l => l.loaded > 0).map(l => `<tr><td dir="auto">${esc(l.design)}</td><td>${esc(l.code)}</td><td>${esc(l.color)}</td><td class="num">${fmtM(l.loaded)} m</td><td class="num">${l.packs}</td></tr>`).join("")
+    writeTo(w, printPage(`Packing List — Shipment ${s.number}`, `<div class="page">
+<div class="hd"><img class="lg" src="${LOGO}"/><div class="tt"><div class="en">PACKING LIST</div><div class="ar">قائمة التعبئة</div></div></div>
+<div class="meta">
+<div><div class="k">SHIPMENT NO. · رقم الشحنة</div><div class="v">${s.number}</div></div>
+<div><div class="k">DATE · التاريخ</div><div class="v">${esc(s.date)}</div></div>
+<div><div class="k">CUSTOMER · العميل</div><div class="v" dir="auto">${esc(project.customer || "—")}</div></div>
+<div><div class="k">TRUCK NO. · رقم السيارة</div><div class="v" dir="auto">${esc(s.truck || "—")}</div></div>
+<div><div class="k">DRIVER · السائق</div><div class="v" dir="auto">${esc(s.driver || "—")}</div></div>
+</div>
+<h2>PACKS · الطرود</h2>
+<table><tr><th style="text-align:center">PACK NO. · ${AR_PACK}</th><th>DESIGN · ${AR_DESIGN}</th><th>CODE · الكود</th><th>COLOR · اللون</th><th class="num">METERS · الأمتار</th></tr>
+${body || `<tr><td colspan="5" style="text-align:center;color:#888;padding:20px">No packs scanned yet</td></tr>`}</table>
+<div class="sum"><h2>SUMMARY · الملخص</h2>
+<table><tr><th>DESIGN · ${AR_DESIGN}</th><th>CODE · الكود</th><th>COLOR · اللون</th><th class="num">TOTAL METERS · إجمالي الأمتار</th><th class="num">PACKS · عدد الطرود</th></tr>
+${summary}
+<tr class="gt"><td colspan="3">GRAND TOTAL · الإجمالي الكلي</td><td class="num">${fmtM(st.meters)} m</td><td class="num">${st.packs.length} packs</td></tr></table></div>
+<div class="sig"><div><div class="ln"></div>Packed by · تم التعبئة بواسطة</div><div><div class="ln"></div>Driver · السائق</div><div><div class="ln"></div>Checked by · تمت المراجعة بواسطة</div></div>
+<div class="foot"><span>Deebtex · Alexandria, Egypt · www.deebtex.com</span><span>MADE IN EGYPT · صنع في مصر</span></div>
+</div>`, `
+@page{size:A4;margin:10mm}
+body{background:#e9e9ef}
+.page{width:210mm;min-height:297mm;background:#fff;margin:10px auto;padding:14mm 13mm;font-size:12px;box-shadow:0 2px 12px rgba(0,0,0,.15)}
+@media print{body{background:#fff}.page{width:auto;min-height:0;margin:0;padding:0;box-shadow:none}}
+.hd{display:flex;justify-content:space-between;align-items:center;border-bottom:2.5px solid #000;padding-bottom:10px;margin-bottom:14px}
+.lg{height:30px}.tt{text-align:right}.tt .en{font-size:22px;font-weight:900;letter-spacing:1.5px}.tt .ar{font-size:18px;font-weight:700}
+.meta{display:grid;grid-template-columns:repeat(5,1fr);border:1px solid #000;margin-bottom:18px}
+.meta>div{padding:7px 9px;border-right:1px solid #000}.meta>div:last-child{border-right:none}
+.meta .k{font-size:9px;font-weight:700;color:#444;letter-spacing:.3px}.meta .v{font-size:13px;font-weight:700;margin-top:3px}
+h2{font-size:12px;letter-spacing:1px;margin:0 0 6px}
+table{width:100%;border-collapse:collapse}
+tr{page-break-inside:avoid}
+th{background:#000;color:#fff;padding:7px 9px;font-size:10.5px;text-align:left;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+td{padding:6px 9px;border-bottom:1px solid #ddd}
+tr.first td{border-top:1px solid #999}
+td.pn{font-size:15px;font-weight:900;text-align:center;border-right:1px solid #ddd;vertical-align:middle;width:16%}
+.mxt{font-size:9px;font-weight:700;color:#666;letter-spacing:.5px}
+tr.ptot td{background:#f3f3f3;font-weight:700;font-size:11px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.num,th.num{text-align:right}
+.sum{margin-top:22px;page-break-inside:avoid}
+.sum tr.gt td{border-top:2.5px solid #000;font-weight:900;font-size:13px}
+.sig{display:flex;justify-content:space-between;gap:24px;margin-top:44px;page-break-inside:avoid}
+.sig div{flex:1;text-align:center;font-size:11px}.sig .ln{border-bottom:1px solid #000;height:38px;margin-bottom:6px}
+.foot{margin-top:26px;border-top:1px solid #bbb;padding-top:8px;font-size:10.5px;display:flex;justify-content:space-between;font-weight:700}
+`))
   }
 
   // ─── RENDER ────────────────────────────────────────────────
-  if (loading) return <div style={st.pad}><div style={st.empty}>Loading rolls…</div></div>
+  if (loading) return <div style={st.pad}><div style={st.empty}>Loading…</div></div>
 
-  // shipment being loaded: the one picked, otherwise the newest open one
   const scanShip = pShips.find(s => s.id === scanShipId) ?? pShips.filter(s => s.status === "open").slice(-1)[0] ?? null
-  live.current = { rolls, shipments, scanShipId: scanShip?.id ?? null }
+  live.current = { packs, rolls, shipments, scanShipId: scanShip?.id ?? null }
 
-  const filteredRolls = pRolls.filter(r => !rollFilter || norm(r.textile).includes(norm(rollFilter)) || r.code.includes(rollFilter.toUpperCase()) || String(r.rollNo) === rollFilter.trim())
-  const unprinted = pRolls.filter(r => !r.printed && !r.voided)
+  const f = norm(filter)
+  const shownPacks = sortedPacks.filter(k => !f || String(k.packNo) === f || (k.barcode ?? "").includes(f) ||
+    rollsOf(k).some(r => norm(r.design).includes(f) || norm(r.code).includes(f) || norm(r.batch).includes(f)))
+  const toPrint = pPacks.filter(k => !k.printed && !k.voided && rollsOf(k).length)
+  const mixable = sortedPacks.filter(canMix)
+  const specField = (k: keyof Spec | "batch", label: string, ph: string, flex = 1) => (
+    <label style={{ flex, minWidth: 90 }}><div style={st.lbl}>{label}</div>
+      <input style={st.input} value={spec[k]} placeholder={ph} dir="auto" onChange={e => setSpec({ ...spec, [k]: e.target.value })} /></label>
+  )
+  const lineInputs = (l: Line, set: (l: Line) => void, del: () => void) => (
+    <div style={{ display: "flex", gap: 5, marginBottom: 6 }}>
+      <input style={{ ...st.input, flex: 2 }} value={l.design} placeholder="Design" dir="auto" onChange={e => set({ ...l, design: e.target.value })} />
+      <input style={{ ...st.input, flex: 1 }} value={l.code} placeholder="Code" onChange={e => set({ ...l, code: e.target.value })} />
+      <input style={{ ...st.input, flex: 1 }} value={l.color} placeholder="Color" onChange={e => set({ ...l, color: e.target.value })} />
+      <input style={{ ...st.input, flex: 1.2 }} type="number" min="0" value={l.meters || ""} placeholder="meters" onChange={e => set({ ...l, meters: Number(e.target.value) })} />
+      <button style={{ ...st.icon, color: "#E24B4A" }} onClick={del}>✕</button>
+    </div>
+  )
 
   return (
     <div style={st.pad} className="dtx-viewpad">
@@ -601,8 +657,8 @@ ${body}
           <option value="">— pick a project —</option>
           {projects.map(p => <option key={p.id} value={p.id}>{p.name}{p.customer ? ` · ${p.customer}` : ""}</option>)}
         </select>
-        {project && <button style={st.btn} onClick={() => setProjForm({ ...project, targets: project.targets.length ? project.targets.map(t => ({ ...t })) : [{ textile: "", meters: 0 }] })}>✏️ Edit</button>}
-        <button style={st.btnP} onClick={() => setProjForm(blankProject())}>+ New project</button>
+        {project && <button style={st.btn} onClick={() => setProjForm({ ...project, targets: project.targets.length ? project.targets.map(t => ({ ...t })) : [blankLine()] })}>✏️ Edit</button>}
+        <button style={st.btnP} onClick={() => setProjForm({ id: 0, name: "", customer: "", targets: [blankLine()], notes: "", closed: false })}>+ New project</button>
         {project && <button style={{ ...st.btn, color: "#E24B4A", marginLeft: "auto" }} onClick={() => deleteProject(project)}>🗑</button>}
       </div>
 
@@ -610,7 +666,7 @@ ${body}
         <div style={{ ...st.card, padding: 32, textAlign: "center", color: "#888" }}>
           <div style={{ fontSize: 30, marginBottom: 8 }}>🏷</div>
           <div style={{ fontWeight: 600, color: "#333", marginBottom: 4 }}>Pick or create a project</div>
-          <div style={{ fontSize: 13 }}>A project is one big order (e.g. a hotel). Add how many meters of each textile were ordered, then print a sticker for every roll.</div>
+          <div style={{ fontSize: 13 }}>A project is one big order (e.g. a hotel). Add the ordered meters for each design, then print a sticker for every pack.</div>
         </div>
       )}
 
@@ -618,24 +674,21 @@ ${body}
         {/* ORDER PROGRESS */}
         <div style={st.card}>
           <div style={st.head}><b>{project.name}</b><span style={st.sub}>{project.customer}</span>
-            <span style={{ ...st.sub, marginLeft: "auto" }}>{pRolls.filter(r => !r.voided).length} rolls · {pShips.length} shipments</span></div>
+            <span style={{ ...st.sub, marginLeft: "auto" }}>{pPacks.filter(k => !k.voided).length} packs · {pShips.length} shipments</span></div>
           <div style={{ padding: "10px 16px 14px" }}>
-            {prog.length === 0 && <div style={st.empty}>Edit the project to add the ordered meters per textile.</div>}
+            {prog.length === 0 && <div style={st.empty}>Edit the project to add the ordered meters per design.</div>}
             {prog.map(x => {
               const max = Math.max(x.ordered, x.made, 1)
               return (
-                <div key={x.name} style={{ marginBottom: 10 }}>
+                <div key={keyOf(x)} style={{ marginBottom: 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 3, gap: 8, flexWrap: "wrap" }}>
-                    <span dir="auto" style={{ fontWeight: 600 }}>{x.name}</span>
-                    <span style={{ color: "#666" }}>
-                      made <b>{fmtM(x.made)}</b> · shipped <b style={{ color: "#166534" }}>{fmtM(x.loaded)}</b>
-                      {x.ordered ? <> / {fmtM(x.ordered)}m ordered</> : " m"}
-                      {x.ordered > 0 && x.loaded >= x.ordered && " ✅"}
-                    </span>
+                    <span dir="auto" style={{ fontWeight: 600 }}>{specLabel(x)}</span>
+                    <span style={{ color: "#666" }}>made <b>{fmtM(x.made)}</b> · shipped <b style={{ color: "#166534" }}>{fmtM(x.shipped)}</b>
+                      {x.ordered ? <> / {fmtM(x.ordered)}m ordered</> : " m"}{x.ordered > 0 && x.shipped >= x.ordered && " ✅"}</span>
                   </div>
                   <div style={{ height: 7, background: "#eee", borderRadius: 4, position: "relative", overflow: "hidden" }}>
                     <div style={{ position: "absolute", inset: 0, width: `${Math.min(100, x.made / max * 100)}%`, background: "#C9C5F2" }} />
-                    <div style={{ position: "absolute", inset: 0, width: `${Math.min(100, x.loaded / max * 100)}%`, background: "#639922" }} />
+                    <div style={{ position: "absolute", inset: 0, width: `${Math.min(100, x.shipped / max * 100)}%`, background: "#639922" }} />
                   </div>
                 </div>
               )
@@ -646,84 +699,103 @@ ${body}
 
         {/* TABS */}
         <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-          {([["rolls", "🏷 Rolls & stickers"], ["shipments", "🚚 Shipments"], ["scan", "📷 Scan"]] as [Tab, string][]).map(([k, l]) => (
+          {([["packs", "🏷 Packs & stickers"], ["shipments", "🚚 Shipments"], ["scan", "📷 Scan"]] as [Tab, string][]).map(([k, l]) => (
             <button key={k} onClick={() => { setTab(k); if (k !== "scan") stopCam() }}
               style={{ ...st.btn, flex: 1, padding: "9px 6px", fontWeight: 600, ...(tab === k ? { background: "#7F77DD", color: "#fff", border: "none" } : {}) }}>{l}</button>
           ))}
         </div>
 
-        {/* ── ROLLS TAB ── */}
-        {tab === "rolls" && <>
+        {/* ── PACKS TAB ── */}
+        {tab === "packs" && <>
           <div style={st.card}>
-            <div style={st.head}><b>Add rolls</b><span style={st.sub}>roll number fills in automatically</span></div>
+            <div style={st.head}><b>Add rolls</b><span style={st.sub}>each roll becomes its own pack — combine small ones with "Create pack"</span></div>
             <div style={{ padding: 16, display: "grid", gap: 10 }}>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
-                <label style={{ flex: 2, minWidth: 180 }}><div style={st.lbl}>Textile</div>
-                  <input list="dtx-roll-textiles" style={st.input} value={rTextile} onChange={e => setRTextile(e.target.value)} placeholder="e.g. Layaly" dir="auto" />
-                  <datalist id="dtx-roll-textiles">{textileNames.map(n => <option key={n} value={n} />)}</datalist>
-                </label>
-                <label style={{ flex: 1, minWidth: 110 }}><div style={st.lbl}>Meters</div>
-                  <input style={st.input} type="number" min="0" step="0.1" value={rMeters} onChange={e => setRMeters(e.target.value)}
-                    onKeyDown={e => { if (e.key === "Enter") addRolls([Number(rMeters)]) }} placeholder="100" />
-                </label>
-                <button style={st.btnP} onClick={() => addRolls([Number(rMeters)])}>+ Add roll</button>
+              {(project.targets.length > 0) && (
+                <label><div style={st.lbl}>From the order</div>
+                  <select style={st.input} value={project.targets.findIndex(t => keyOf(t) === keyOf(spec))}
+                    onChange={e => { const t = project.targets[Number(e.target.value)]; if (t) setSpec({ ...spec, design: t.design, code: t.code, color: t.color }) }}>
+                    <option value={-1}>— pick a design from the order —</option>
+                    {project.targets.map((t, i) => <option key={i} value={i}>{specLabel(t)} · {fmtM(t.meters)}m ordered</option>)}
+                  </select></label>
+              )}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {specField("design", "Design · الرسمة", "Layaly", 2)}
+                {specField("code", "Code", "1007")}
+                {specField("color", "Color", "3")}
+                {specField("batch", "Batch", "B-2410")}
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
-                <label style={{ flex: 1, minWidth: 220 }}><div style={st.lbl}>Or add several rolls of this textile at once — meters separated by commas</div>
-                  <input style={st.input} value={rBulk} onChange={e => setRBulk(e.target.value)} placeholder="100, 98, 102.5, 100" />
-                </label>
+                <label style={{ width: 130 }}><div style={st.lbl}>Meters</div>
+                  <input style={st.input} type="number" min="0" step="0.1" value={rMeters} onChange={e => setRMeters(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter") addRolls([Number(rMeters)]) }} placeholder="100" /></label>
+                <button style={st.btnP} onClick={() => addRolls([Number(rMeters)])}>+ Add roll</button>
+                <span style={{ fontSize: 12, color: "#aaa", padding: "0 4px 9px" }}>or several:</span>
+                <label style={{ flex: 1, minWidth: 180 }}><div style={st.lbl}>Meters separated by commas</div>
+                  <input style={st.input} value={rBulk} onChange={e => setRBulk(e.target.value)} placeholder="100, 98, 102.5" /></label>
                 <button style={st.btn} onClick={() => addRolls(rBulk.split(/[,\s،]+/).map(Number))}>
-                  + Add {rBulk.split(/[,\s،]+/).map(Number).filter(n => n > 0).length || ""} rolls
-                </button>
+                  + Add {rBulk.split(/[,\s،]+/).map(Number).filter(n => n > 0).length || ""} rolls</button>
               </div>
             </div>
           </div>
 
           <div style={st.card}>
             <div style={{ ...st.head, flexWrap: "wrap" }}>
-              <b>Rolls</b><span style={st.sub}>{pRolls.length}</span>
-              <input style={{ ...st.input, width: 150, padding: "5px 9px", fontSize: 12 }} placeholder="Filter…" value={rollFilter} onChange={e => setRollFilter(e.target.value)} dir="auto" />
+              <b>Packs</b><span style={st.sub}>{pPacks.length}</span>
+              <input style={{ ...st.input, width: 140, padding: "5px 9px", fontSize: 12 }} placeholder="Filter…" value={filter} onChange={e => setFilter(e.target.value)} dir="auto" />
               <div style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                 <span style={{ fontSize: 11, color: "#999" }}>Sticker
-                  <input type="number" style={st.tiny} value={lblW} onChange={e => setLblW(Number(e.target.value) || 100)} />×
-                  <input type="number" style={st.tiny} value={lblH} onChange={e => setLblH(Number(e.target.value) || 75)} />mm</span>
-                {sel.size > 0 && <button style={st.btn} onClick={() => printStickers(pRolls.filter(r => sel.has(r.id)))}>🖨 Print selected ({sel.size})</button>}
-                <button style={{ ...st.btnP, opacity: unprinted.length ? 1 : 0.5 }} disabled={!unprinted.length} onClick={() => printStickers(unprinted)}>
-                  🖨 Print new stickers ({unprinted.length})
-                </button>
+                  <input type="number" style={st.tiny} value={lblW} onChange={e => setLblW(Number(e.target.value) || 50)} />×
+                  <input type="number" style={st.tiny} value={lblH} onChange={e => setLblH(Number(e.target.value) || 100)} />mm</span>
+                <button style={{ ...st.btn, opacity: mixable.length >= 2 ? 1 : 0.5 }} disabled={mixable.length < 2} onClick={() => setMixPick(new Set())}>📦 Create pack</button>
+                {sel.size > 0 && <button style={st.btn} onClick={() => printPacks(pPacks.filter(k => sel.has(k.id)))}>🖨 Print selected ({sel.size})</button>}
+                <button style={{ ...st.btnP, opacity: toPrint.length ? 1 : 0.5 }} disabled={!toPrint.length} onClick={() => printPacks(toPrint)}>
+                  🖨 Print new stickers ({toPrint.length})</button>
               </div>
             </div>
             <div style={{ overflowX: "auto" }}>
               <table style={st.table}>
                 <thead><tr>
-                  <th style={st.th}><input type="checkbox" checked={filteredRolls.length > 0 && filteredRolls.every(r => sel.has(r.id))}
-                    onChange={e => setSel(e.target.checked ? new Set(filteredRolls.map(r => r.id)) : new Set())} /></th>
-                  {["Roll", "Textile", "Meters", "Barcode", "Status", ""].map(h => <th key={h} style={st.th}>{h}</th>)}
+                  <th style={st.th}><input type="checkbox" checked={shownPacks.length > 0 && shownPacks.every(k => sel.has(k.id))}
+                    onChange={e => setSel(e.target.checked ? new Set(shownPacks.map(k => k.id)) : new Set())} /></th>
+                  {["Pack", "Design", "Code", "Color", "Batch", "Meters", "Status", ""].map(h => <th key={h} style={st.th}>{h}</th>)}
                 </tr></thead>
                 <tbody>
-                  {filteredRolls.length === 0 && <tr><td colSpan={7} style={{ ...st.td, color: "#aaa", textAlign: "center", padding: 20 }}>No rolls yet.</td></tr>}
-                  {filteredRolls.map(r => {
-                    const sh = r.shipmentId != null ? shipments.find(s => s.id === r.shipmentId) : null
-                    return (
-                      <tr key={r.id} style={{ opacity: r.voided ? 0.5 : 1 }}>
-                        <td style={st.td}><input type="checkbox" checked={sel.has(r.id)} onChange={e => setSel(s => { const n = new Set(s); if (e.target.checked) n.add(r.id); else n.delete(r.id); return n })} /></td>
-                        <td style={{ ...st.td, fontWeight: 700 }}>#{r.rollNo}</td>
-                        <td style={st.td} dir="auto">{r.textile}</td>
-                        <td style={{ ...st.td, fontWeight: 600, color: "#534AB7" }}>{fmtM(r.meters)}m</td>
-                        <td style={{ ...st.td, fontFamily: "monospace", fontSize: 11, color: "#888" }}>{r.code}{!r.printed && !r.voided && <span style={st.tag}>not printed</span>}</td>
-                        <td style={st.td}>
-                          {r.voided ? <span style={{ ...st.tag, background: "#FEEBEB", color: "#A32D2D" }}>cancelled</span>
-                            : sh ? <span style={{ ...st.tag, background: "#EDFBEE", color: "#166534" }}>🚚 shipment {sh.number}</span>
-                            : <span style={{ ...st.tag, background: "#F3F2FD", color: "#534AB7" }}>in store</span>}
-                        </td>
-                        <td style={{ ...st.td, whiteSpace: "nowrap", textAlign: "right" }}>
-                          <button style={st.icon} title="Print sticker" onClick={() => printStickers([r])}>🖨</button>
-                          <button style={st.icon} title="Edit" onClick={() => setEditRoll({ ...r })}>✏️</button>
-                          <button style={st.icon} title={r.voided ? "Bring back" : "Cancel roll"} onClick={() => toggleVoid(r)}>{r.voided ? "↩" : "⛔"}</button>
-                          <button style={{ ...st.icon, color: "#E24B4A" }} title="Delete" onClick={() => deleteRoll(r)}>🗑</button>
-                        </td>
+                  {shownPacks.length === 0 && <tr><td colSpan={9} style={{ ...st.td, color: "#aaa", textAlign: "center", padding: 20 }}>No packs yet.</td></tr>}
+                  {shownPacks.map(k => {
+                    const rs = rollsOf(k), mixed = rs.length > 1
+                    const sh = k.shipmentId != null ? shipments.find(s => s.id === k.shipmentId) : null
+                    const bt = { ...st.td, borderBottom: "0.5px solid #e8e8e8" }
+                    return rs.map((r, i) => (
+                      <tr key={r.id} style={{ opacity: k.voided ? 0.5 : 1, background: mixed ? "#FCFBFF" : undefined }}>
+                        {i === 0 && <>
+                          <td style={bt} rowSpan={rs.length}><input type="checkbox" checked={sel.has(k.id)} onChange={e => setSel(s => { const n = new Set(s); if (e.target.checked) n.add(k.id); else n.delete(k.id); return n })} /></td>
+                          <td style={{ ...bt, fontWeight: 800, fontSize: 15 }} rowSpan={rs.length}>
+                            {k.packNo ?? <span style={{ color: "#bbb", fontWeight: 400, fontSize: 12 }}>—</span>}
+                            {mixed && <div style={{ fontSize: 10, color: "#7F77DD", fontWeight: 700 }}>MIXED · {fmtM(sumM(rs))}m</div>}
+                          </td>
+                        </>}
+                        <td style={st.td} dir="auto">{r.design}</td>
+                        <td style={st.td}>{r.code}</td>
+                        <td style={st.td}>{r.color}</td>
+                        <td style={{ ...st.td, color: "#888" }}>{r.batch}</td>
+                        <td style={{ ...st.td, fontWeight: 600, color: "#534AB7", whiteSpace: "nowrap" }}>{fmtM(r.meters)}m
+                          <button style={{ ...st.icon, fontSize: 12 }} title="Edit roll" onClick={() => setEditRoll({ ...r })}>✏️</button></td>
+                        {i === 0 && <>
+                          <td style={bt} rowSpan={rs.length}>
+                            {k.voided ? <span style={{ ...st.tag, background: "#FEEBEB", color: "#A32D2D" }}>cancelled</span>
+                              : sh ? <span style={{ ...st.tag, background: "#EDFBEE", color: "#166534" }}>🚚 shipment {sh.number}</span>
+                              : <span style={{ ...st.tag, background: "#F3F2FD", color: "#534AB7" }}>in store</span>}
+                            {!k.printed && !k.voided && <span style={st.tag}>{k.packNo ? "reprint" : "not printed"}</span>}
+                          </td>
+                          <td style={{ ...bt, whiteSpace: "nowrap", textAlign: "right" }} rowSpan={rs.length}>
+                            <button style={st.icon} title="Print sticker" onClick={() => printPacks([k])}>🖨</button>
+                            {mixed && k.packNo == null && <button style={st.icon} title="Split back into rolls" onClick={() => unpack(k)}>✂️</button>}
+                            <button style={st.icon} title={k.voided ? "Bring back" : "Cancel pack"} onClick={() => toggleVoid(k)}>{k.voided ? "↩" : "⛔"}</button>
+                            <button style={{ ...st.icon, color: "#E24B4A" }} title="Delete" onClick={() => deletePack(k)}>🗑</button>
+                          </td>
+                        </>}
                       </tr>
-                    )
+                    ))
                   })}
                 </tbody>
               </table>
@@ -737,7 +809,7 @@ ${body}
             <div style={st.head}><b>Shipments</b><span style={st.sub}>{pShips.length}</span>
               <button style={{ ...st.btnP, marginLeft: "auto" }} onClick={() => setShipForm(newShipmentDraft())}>+ New shipment</button></div>
             <div style={{ padding: "4px 16px 12px" }}>
-              {pShips.length === 0 && <div style={{ ...st.empty, padding: "20px 0" }}>No shipments yet. Create one when the truck arrives, then scan the rolls.</div>}
+              {pShips.length === 0 && <div style={{ ...st.empty, padding: "20px 0" }}>No shipments yet. Create one when the truck arrives, then scan the packs.</div>}
               {[...pShips].reverse().map(s => {
                 const ss = shipStats(s)
                 return (
@@ -747,19 +819,16 @@ ${body}
                       <span style={{ ...st.tag, ...(s.status === "open" ? { background: "#FEF3C7", color: "#92400E" } : { background: "#EDFBEE", color: "#166534" }) }}>
                         {s.status === "open" ? "loading" : "closed"}</span>
                       <span style={st.sub}>{s.date}{s.truck ? ` · 🚚 ${s.truck}` : ""}{s.driver ? ` · ${s.driver}` : ""}</span>
-                      <span style={{ marginLeft: "auto", fontWeight: 600 }}>{ss.rolls.length} rolls · {fmtM(ss.meters)}m</span>
+                      <span style={{ marginLeft: "auto", fontWeight: 600 }}>{ss.packs.length} packs · {fmtM(ss.meters)}m</span>
                     </div>
                     <div style={{ fontSize: 12, color: "#777", marginTop: 4 }}>
-                      {ss.lines.map(l => <span key={l.name} style={{ marginRight: 12 }} dir="auto">{l.name}: {fmtM(l.loaded)}{l.plan ? `/${fmtM(l.plan)}` : ""}m</span>)}
+                      {ss.lines.map(l => <span key={keyOf(l)} style={{ marginRight: 12 }} dir="auto">{specLabel(l)}: {fmtM(l.loaded)}{l.plan ? `/${fmtM(l.plan)}` : ""}m</span>)}
                     </div>
                     <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
                       {s.status === "open"
-                        ? <>
-                            <button style={st.btnP} onClick={() => { setScanShipId(s.id); setTab("scan") }}>📷 Scan rolls</button>
-                            <button style={st.btn} onClick={() => setShipStatus(s, "closed")}>✓ Close shipment</button>
-                          </>
+                        ? <><button style={st.btnP} onClick={() => { setScanShipId(s.id); setTab("scan") }}>📷 Scan packs</button>
+                            <button style={st.btn} onClick={() => setShipStatus(s, "closed")}>✓ Close shipment</button></>
                         : <button style={st.btn} onClick={() => setShipStatus(s, "open")}>↩ Reopen</button>}
-                      <button style={st.btn} onClick={() => exportDeliveryNote(s)}>📄 Delivery note · إذن تسليم</button>
                       <button style={st.btn} onClick={() => exportPackingList(s)}>📄 Packing list</button>
                       <button style={st.btn} onClick={() => setShipForm({ ...s, plan: s.plan.map(l => ({ ...l })) })}>✏️</button>
                       <button style={{ ...st.btn, color: "#E24B4A" }} onClick={() => deleteShipment(s)}>🗑</button>
@@ -786,26 +855,22 @@ ${body}
               <button style={st.btn} onClick={() => setShipForm(newShipmentDraft())}>+ New</button>
             </div>
 
-            {scanShip && <>
-              {/* camera */}
+            {scanShip && ss && <>
               <div style={{ ...st.card, padding: 12 }}>
                 <div id="dtx-reader" style={{ width: "100%", maxWidth: 520, margin: "0 auto", borderRadius: 10, overflow: "hidden", background: camOn ? "#000" : "transparent" }} />
                 <div style={{ display: "flex", gap: 8, marginTop: camOn ? 10 : 0, flexWrap: "wrap" }}>
                   {!camOn
-                    ? <button style={{ ...st.btnP, flex: 1, padding: 14, fontSize: 15 }} onClick={startCam} disabled={scanShip.status === "closed"}>📷 Start camera</button>
+                    ? <button style={{ ...st.btnP, flex: 1, padding: 14, fontSize: 15, opacity: scanShip.status === "closed" ? 0.5 : 1 }} onClick={startCam} disabled={scanShip.status === "closed"}>📷 Start camera</button>
                     : <button style={{ ...st.btn, flex: 1, padding: 12 }} onClick={stopCam}>■ Stop camera</button>}
                   <button style={{ ...st.btn, padding: 12, opacity: undoStack.length ? 1 : 0.4 }} disabled={!undoStack.length} onClick={undoLast}>↩ Undo last</button>
                 </div>
                 {camErr && <div style={{ color: "#A32D2D", fontSize: 12, marginTop: 8 }}>{camErr}</div>}
-                <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
-                  <input style={{ ...st.input, fontFamily: "monospace" }} placeholder="Or type / scan code here (DTX000001) + Enter" value={manual}
-                    onChange={e => setManual(e.target.value)}
-                    onKeyDown={e => { if (e.key === "Enter") { lastScan.current = { code: "", t: 0 }; processCode(manual); setManual("") } }} />
-                </div>
-                {scanShip.status === "closed" && <div style={{ fontSize: 12, color: "#92400E", marginTop: 8 }}>This shipment is closed. Reopen it from the Shipments tab to add rolls.</div>}
+                <input style={{ ...st.input, fontFamily: "monospace", marginTop: 10 }} placeholder="Or type / scan the barcode number + Enter" value={manual} inputMode="numeric"
+                  onChange={e => setManual(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") { lastScan.current = { code: "", t: 0 }; processCode(manual); setManual("") } }} />
+                {scanShip.status === "closed" && <div style={{ fontSize: 12, color: "#92400E", marginTop: 8 }}>This shipment is closed. Reopen it from the Shipments tab to add packs.</div>}
               </div>
 
-              {/* feedback */}
               {fresh && (
                 <div style={{ ...st.banner, fontSize: 15, fontWeight: 700, padding: "14px 16px",
                   ...(feedback!.ok ? { background: "#EDFBEE", color: "#166534", borderColor: "#86EFAC" } : { background: "#FEEBEB", color: "#A32D2D", borderColor: "#fca5a5" }) }} dir="auto">
@@ -813,52 +878,52 @@ ${body}
                 </div>
               )}
 
-              {/* this truck */}
               <div style={st.card}>
                 <div style={st.head}><b>Shipment {scanShip.number}</b>
-                  <span style={{ marginLeft: "auto", fontSize: 18, fontWeight: 800, color: "#534AB7" }}>{ss!.rolls.length} rolls · {fmtM(ss!.meters)}m</span></div>
+                  <span style={{ marginLeft: "auto", fontSize: 18, fontWeight: 800, color: "#534AB7" }}>{ss.packs.length} packs · {fmtM(ss.meters)}m</span></div>
                 <div style={{ padding: "10px 16px" }}>
-                  {ss!.lines.length === 0 && <div style={st.empty}>Scan the first roll…</div>}
-                  {ss!.lines.map(l => {
-                    const orderLine = prog.find(x => norm(x.name) === norm(l.name))
+                  {ss.lines.length === 0 && <div style={st.empty}>Scan the first pack…</div>}
+                  {ss.lines.map(l => {
+                    const o = prog.find(x => keyOf(x) === keyOf(l))
                     const pct = l.plan ? Math.min(100, l.loaded / l.plan * 100) : 100
                     const done = l.plan > 0 && l.loaded >= l.plan
                     return (
-                      <div key={l.name} style={{ marginBottom: 12 }}>
+                      <div key={keyOf(l)} style={{ marginBottom: 12 }}>
                         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, gap: 8, flexWrap: "wrap" }}>
-                          <span dir="auto" style={{ fontWeight: 700 }}>{l.name}</span>
-                          <span><b style={{ fontSize: 16 }}>{fmtM(l.loaded)}</b>{l.plan ? ` / ${fmtM(l.plan)}m` : "m"} loaded {done ? "✅" : ""} <span style={{ color: "#999" }}>({l.rolls} rolls)</span></span>
+                          <span dir="auto" style={{ fontWeight: 700 }}>{specLabel(l)}</span>
+                          <span><b style={{ fontSize: 16 }}>{fmtM(l.loaded)}</b>{l.plan ? ` / ${fmtM(l.plan)}m` : "m"} loaded {done ? "✅" : ""} <span style={{ color: "#999" }}>({l.packs} packs)</span></span>
                         </div>
                         <div style={{ height: 8, background: "#eee", borderRadius: 4, overflow: "hidden", margin: "4px 0 2px" }}>
                           <div style={{ height: "100%", width: `${pct}%`, background: done ? "#639922" : "#7F77DD" }} />
                         </div>
-                        {orderLine && orderLine.ordered > 0 && <div style={{ fontSize: 11, color: "#999" }}>Whole order: {fmtM(orderLine.loaded)} / {fmtM(orderLine.ordered)}m shipped</div>}
+                        {o && o.ordered > 0 && <div style={{ fontSize: 11, color: "#999" }}>Whole order: {fmtM(o.shipped)} / {fmtM(o.ordered)}m shipped</div>}
                       </div>
                     )
                   })}
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
                     {scanShip.status === "open" && <button style={st.btnP} onClick={async () => { await stopCam(); await setShipStatus(scanShip, "closed") }}>✓ Close shipment</button>}
-                    <button style={st.btn} onClick={() => exportDeliveryNote(scanShip)}>📄 Delivery note</button>
                     <button style={st.btn} onClick={() => exportPackingList(scanShip)}>📄 Packing list</button>
                   </div>
                 </div>
               </div>
 
-              {/* loaded rolls */}
               <div style={st.card}>
-                <div style={st.head}><b>Loaded rolls</b><span style={st.sub}>latest first</span></div>
+                <div style={st.head}><b>Loaded packs</b><span style={st.sub}>latest first</span></div>
                 <div style={{ padding: "4px 16px 10px" }}>
-                  {[...ss!.rolls].sort((a, b) => (undoStack.indexOf(b.id)) - (undoStack.indexOf(a.id)) || b.rollNo - a.rollNo).map(r => (
-                    <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: "0.5px solid #f3f3f3", fontSize: 13 }}>
-                      <b style={{ width: 44 }}>#{r.rollNo}</b>
-                      <span style={{ flex: 1 }} dir="auto">{r.textile}</span>
-                      <span style={{ fontWeight: 600 }}>{fmtM(r.meters)}m</span>
-                      {scanShip.status === "open" && (
-                        <button style={{ ...st.icon, color: "#E24B4A" }} title="Remove from truck"
-                          onClick={() => { if (window.confirm(`Remove roll #${r.rollNo} from shipment ${scanShip.number}?`)) unload(r) }}>✕</button>
-                      )}
-                    </div>
-                  ))}
+                  {[...ss.packs].sort((a, b) => undoStack.indexOf(b.id) - undoStack.indexOf(a.id) || (b.packNo ?? 0) - (a.packNo ?? 0)).map(k => {
+                    const rs = rollsOf(k)
+                    return (
+                      <div key={k.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: "0.5px solid #f3f3f3", fontSize: 13 }}>
+                        <b style={{ width: 54 }}>Pack {k.packNo}</b>
+                        <span style={{ flex: 1 }} dir="auto">{rs.length > 1 ? `Mixed · ${rs.map(r => r.design).join(", ")}` : rs[0] ? specLabel(rs[0]) : ""}</span>
+                        <span style={{ fontWeight: 600 }}>{fmtM(sumM(rs))}m</span>
+                        {scanShip.status === "open" && (
+                          <button style={{ ...st.icon, color: "#E24B4A" }} title="Remove from truck"
+                            onClick={() => { if (window.confirm(`Remove pack ${k.packNo} from shipment ${scanShip.number}?`)) unload(k) }}>✕</button>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
             </>}
@@ -867,6 +932,26 @@ ${body}
         })()}
       </>}
 
+      {/* ── CREATE MIXED PACK ── */}
+      {mixPick && (
+        <Overlay title="📦 Create mixed pack" onClose={() => setMixPick(null)}>
+          <div style={{ fontSize: 12, color: "#777" }}>Tick the rolls wound together into one big roll. Only rolls without a printed sticker are shown.</div>
+          <div style={{ maxHeight: 340, overflowY: "auto", border: "0.5px solid #eee", borderRadius: 8 }}>
+            {mixable.map(k => { const r = rollsOf(k)[0]; return (
+              <label key={k.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderBottom: "0.5px solid #f3f3f3", cursor: "pointer", fontSize: 13 }}>
+                <input type="checkbox" checked={mixPick.has(k.id)} onChange={e => { const n = new Set(mixPick); if (e.target.checked) n.add(k.id); else n.delete(k.id); setMixPick(n) }} />
+                <span style={{ flex: 1 }} dir="auto">{specLabel(r)}{r.batch ? <span style={{ color: "#aaa" }}> · {r.batch}</span> : null}</span>
+                <b>{fmtM(r.meters)}m</b>
+              </label>
+            ) })}
+          </div>
+          {(() => { const picked = mixable.filter(k => mixPick.has(k.id)); const m = picked.reduce((a, k) => a + sumM(rollsOf(k)), 0); return (
+            <button style={{ ...st.btnP, padding: 11, opacity: picked.length >= 2 ? 1 : 0.5 }} disabled={picked.length < 2} onClick={() => createMixed(picked.map(k => k.id))}>
+              {picked.length >= 2 ? `Create pack · ${picked.length} rolls · ${fmtM(m)}m` : "Pick at least 2 rolls"}</button>
+          ) })()}
+        </Overlay>
+      )}
+
       {/* ── PROJECT FORM ── */}
       {projForm && (
         <Overlay title={projForm.id ? "Edit project" : "New project"} onClose={() => setProjForm(null)}>
@@ -874,17 +959,11 @@ ${body}
             <input style={st.input} value={projForm.name} onChange={e => setProjForm({ ...projForm, name: e.target.value })} placeholder="e.g. Flamingo hotel order" dir="auto" autoFocus /></label>
           <label><div style={st.lbl}>Customer (printed on stickers)</div>
             <input style={st.input} value={projForm.customer} onChange={e => setProjForm({ ...projForm, customer: e.target.value })} placeholder="e.g. PrideInn Flamingo Beach Resort" dir="auto" /></label>
-          <div><div style={st.lbl}>Ordered meters per textile</div>
-            {projForm.targets.map((t, i) => (
-              <div key={i} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-                <input style={{ ...st.input, flex: 2 }} value={t.textile} placeholder="Textile name" dir="auto"
-                  onChange={e => setProjForm({ ...projForm, targets: projForm.targets.map((x, j) => j === i ? { ...x, textile: e.target.value } : x) })} />
-                <input style={{ ...st.input, flex: 1 }} type="number" min="0" value={t.meters || ""} placeholder="meters"
-                  onChange={e => setProjForm({ ...projForm, targets: projForm.targets.map((x, j) => j === i ? { ...x, meters: Number(e.target.value) } : x) })} />
-                <button style={{ ...st.icon, color: "#E24B4A" }} onClick={() => setProjForm({ ...projForm, targets: projForm.targets.filter((_, j) => j !== i) })}>✕</button>
-              </div>
-            ))}
-            <button style={st.btn} onClick={() => setProjForm({ ...projForm, targets: [...projForm.targets, { textile: "", meters: 0 }] })}>+ Add textile</button>
+          <div><div style={st.lbl}>Ordered meters — design · code · color · meters</div>
+            {projForm.targets.map((t, i) => <div key={i}>{lineInputs(t,
+              l => setProjForm({ ...projForm, targets: projForm.targets.map((x, j) => j === i ? l : x) }),
+              () => setProjForm({ ...projForm, targets: projForm.targets.filter((_, j) => j !== i) }))}</div>)}
+            <button style={st.btn} onClick={() => setProjForm({ ...projForm, targets: [...projForm.targets, blankLine()] })}>+ Add design</button>
           </div>
           <label><div style={st.lbl}>Notes (optional)</div>
             <input style={st.input} value={projForm.notes} onChange={e => setProjForm({ ...projForm, notes: e.target.value })} dir="auto" /></label>
@@ -901,16 +980,10 @@ ${body}
             <label style={{ gridColumn: "1 / -1" }}><div style={st.lbl}>Driver · السائق</div><input style={st.input} value={shipForm.driver} onChange={e => setShipForm({ ...shipForm, driver: e.target.value })} dir="auto" /></label>
           </div>
           <div><div style={st.lbl}>Planned for this truck (meters) — the scan screen shows "loaded / planned"</div>
-            {shipForm.plan.map((l, i) => (
-              <div key={i} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-                <input list="dtx-roll-textiles" style={{ ...st.input, flex: 2 }} value={l.textile} dir="auto"
-                  onChange={e => setShipForm({ ...shipForm, plan: shipForm.plan.map((x, j) => j === i ? { ...x, textile: e.target.value } : x) })} />
-                <input style={{ ...st.input, flex: 1 }} type="number" min="0" value={l.meters || ""} placeholder="meters"
-                  onChange={e => setShipForm({ ...shipForm, plan: shipForm.plan.map((x, j) => j === i ? { ...x, meters: Number(e.target.value) } : x) })} />
-                <button style={{ ...st.icon, color: "#E24B4A" }} onClick={() => setShipForm({ ...shipForm, plan: shipForm.plan.filter((_, j) => j !== i) })}>✕</button>
-              </div>
-            ))}
-            <button style={st.btn} onClick={() => setShipForm({ ...shipForm, plan: [...shipForm.plan, { textile: "", meters: 0 }] })}>+ Add textile</button>
+            {shipForm.plan.map((l, i) => <div key={i}>{lineInputs(l,
+              x => setShipForm({ ...shipForm, plan: shipForm.plan.map((y, j) => j === i ? x : y) }),
+              () => setShipForm({ ...shipForm, plan: shipForm.plan.filter((_, j) => j !== i) }))}</div>)}
+            <button style={st.btn} onClick={() => setShipForm({ ...shipForm, plan: [...shipForm.plan, blankLine()] })}>+ Add design</button>
           </div>
           <label><div style={st.lbl}>Notes (optional)</div><input style={st.input} value={shipForm.notes} onChange={e => setShipForm({ ...shipForm, notes: e.target.value })} dir="auto" /></label>
           <button style={{ ...st.btnP, padding: 11 }} onClick={saveShipment}>{shipForm.id ? "Save changes" : "Create & start scanning"}</button>
@@ -919,10 +992,16 @@ ${body}
 
       {/* ── EDIT ROLL ── */}
       {editRoll && (
-        <Overlay title={`Edit roll #${editRoll.rollNo}`} onClose={() => setEditRoll(null)}>
-          <label><div style={st.lbl}>Textile</div><input list="dtx-roll-textiles" style={st.input} value={editRoll.textile} onChange={e => setEditRoll({ ...editRoll, textile: e.target.value })} dir="auto" /></label>
-          <label><div style={st.lbl}>Meters</div><input style={st.input} type="number" min="0" step="0.1" value={editRoll.meters || ""} onChange={e => setEditRoll({ ...editRoll, meters: Number(e.target.value) })} /></label>
-          <div style={{ fontSize: 12, color: "#888" }}>The barcode stays the same. If you change the meters or textile, the roll goes back to "not printed" so you remember to reprint its sticker.</div>
+        <Overlay title="Edit roll" onClose={() => setEditRoll(null)}>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 8 }}>
+            {(["design", "code", "color"] as const).map(k => (
+              <label key={k}><div style={st.lbl}>{k === "design" ? "Design · الرسمة" : k[0].toUpperCase() + k.slice(1)}</div>
+                <input style={st.input} value={editRoll[k]} dir="auto" onChange={e => setEditRoll({ ...editRoll, [k]: e.target.value })} /></label>
+            ))}
+            <label><div style={st.lbl}>Batch</div><input style={st.input} value={editRoll.batch} onChange={e => setEditRoll({ ...editRoll, batch: e.target.value })} /></label>
+            <label><div style={st.lbl}>Meters</div><input style={st.input} type="number" min="0" step="0.1" value={editRoll.meters || ""} onChange={e => setEditRoll({ ...editRoll, meters: Number(e.target.value) })} /></label>
+          </div>
+          <div style={{ fontSize: 12, color: "#888" }}>If the sticker was already printed, the pack keeps its number and barcode and is marked "reprint" so you print the corrected sticker.</div>
           <button style={{ ...st.btnP, padding: 11 }} onClick={saveEditRoll}>Save</button>
         </Overlay>
       )}
@@ -933,7 +1012,7 @@ ${body}
 function Overlay({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 12 }} onClick={onClose}>
-      <div style={{ background: "#fff", borderRadius: 12, width: 480, maxWidth: "100%", maxHeight: "92vh", overflowY: "auto", padding: 20, display: "grid", gap: 12 }} onClick={e => e.stopPropagation()}>
+      <div style={{ background: "#fff", borderRadius: 12, width: 560, maxWidth: "100%", maxHeight: "92vh", overflowY: "auto", padding: 20, display: "grid", gap: 12 }} onClick={e => e.stopPropagation()}>
         <div style={{ display: "flex", alignItems: "center" }}><b style={{ fontSize: 16, flex: 1 }}>{title}</b>
           <button style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#999" }} onClick={onClose}>✕</button></div>
         {children}
@@ -958,7 +1037,7 @@ const st: Record<string, CSSProperties> = {
   icon:   { background: "none", border: "none", cursor: "pointer", fontSize: 14, padding: "2px 5px" },
   table:  { width: "100%", borderCollapse: "collapse", fontSize: 13 },
   th:     { textAlign: "left", padding: "8px 10px", fontSize: 11, color: "#888", fontWeight: 500, borderBottom: "0.5px solid #eee", background: "#fafafa" },
-  td:     { padding: "8px 10px", borderBottom: "0.5px solid #f5f5f5" },
+  td:     { padding: "7px 10px", borderBottom: "0.5px solid #f5f5f5", verticalAlign: "middle" },
   tag:    { display: "inline-block", fontSize: 10, fontWeight: 600, borderRadius: 4, padding: "1px 6px", marginLeft: 6, background: "#f3f3f3", color: "#999" },
 }
 
