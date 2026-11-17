@@ -524,12 +524,13 @@ async function dbUpsert(table: string, row: Record<string, unknown>) {
 
 // Delete with localStorage backup sync
 async function dbDelete(table: string, id: number) {
-  // remove from localStorage backup
-  try {
-    const key = `dtx_backup_${table}`
-    const existing: Record<string, unknown>[] = JSON.parse(localStorage.getItem(key) || "[]")
-    localStorage.setItem(key, JSON.stringify(existing.filter(r => r.id !== id)))
-  } catch {}
+  // remove from both localStorage backups (current and legacy key)
+  for (const key of [`dtx_backup_${table}`, `dtx_${table}`]) {
+    try {
+      const existing: Record<string, unknown>[] = JSON.parse(localStorage.getItem(key) || "[]")
+      localStorage.setItem(key, JSON.stringify(existing.filter(r => Number(r.id) !== id)))
+    } catch {}
+  }
 
   const { error } = await db.from(table).delete().eq("id", id)
   if (error) console.error(`dbDelete ${table}:`, error.message)
@@ -1417,15 +1418,17 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     // 1. Load all data on mount
     async function recoverFromBackup<T extends { id: number }>(
       table: string, oldKey: string, dbRows: T[],
-      sanitize: (r: Record<string, unknown>) => T
+      sanitize: (r: Record<string, unknown>) => T,
+      deletedIds: Set<number> = new Set()
     ): Promise<T[]> {
       try {
         const backupRaw = localStorage.getItem(`dtx_backup_${table}`) || "[]"
         const oldRaw    = localStorage.getItem(oldKey) || "[]"
         const backup: Record<string, unknown>[] = [...JSON.parse(backupRaw), ...JSON.parse(oldRaw)]
-        if (backup.length === 0) return dbRows
+        if (backup.length === 0) return dbRows.filter(r => !deletedIds.has(Number(r.id)))
         const dbIds = new Set(dbRows.map(r => r.id))
-        const missing = backup.filter(r => !dbIds.has(Number(r.id)))
+        // never bring back an order the user deleted, from any device's backup
+        const missing = backup.filter(r => !dbIds.has(Number(r.id)) && !deletedIds.has(Number(r.id)))
         if (missing.length === 0) return dbRows
         for (const row of missing) await dbUpsert(table, row)
         return [...dbRows, ...missing.map(sanitize)]
@@ -1438,8 +1441,14 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         dbLoadThreads(), dbLoadStockLog(), dbLoadTextileStock(),
         dbLoadRaw("textile_families", "base_code"),
       ])
+      // IDs of orders the user deleted (see delOrder) — these must never be restored
+      let deletedIds = new Set<number>()
+      try {
+        const { data } = await db.from("deleted_orders").select("id")
+        deletedIds = new Set((data || []).map((r: { id: number }) => Number(r.id)))
+      } catch {}
       const [recoveredO, recoveredT] = await Promise.all([
-        recoverFromBackup("orders",   "dtx_orders",   o, sanitizeOrder),
+        recoverFromBackup("orders",   "dtx_orders",   o, sanitizeOrder, deletedIds),
         recoverFromBackup("textiles", "dtx_textiles", t, sanitizeTextile),
       ])
       setMachines(m); setOrders(recoveredO); setTextiles(recoveredT)
@@ -1788,6 +1797,9 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
 
   async function delOrder(id: number) {
     setOrders(p => p.filter(o => o.id!==id))
+    // remember the deletion first, so no device's old backup can bring this order back
+    const { error } = await db.from("deleted_orders").upsert({ id }, { onConflict: "id", ignoreDuplicates: true })
+    if (error) console.error("deleted_orders:", error.message)
     await dbDelete("orders", id)
   }
   async function delMachine(id: number) {
