@@ -1374,6 +1374,8 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
   const [warpOrder, setWarpOrder] = useState<WarpOrder>({})
   const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(new Set())
   const [warpGroupSearch, setWarpGroupSearch] = useState("")
+  // Old finished orders with no store (from before tracking started) — left out of the "No store assigned" count only
+  const [noStoreBacklogIds, setNoStoreBacklogIds] = useState<Set<number>>(new Set())
   const [confirmDeleteOrder, setConfirmDeleteOrder] = useState<Order|null>(null)
   const [expandedBase, setExpandedBase] = useState<string|null>(null)
   const [expandedSuggestion, setExpandedSuggestion] = useState<string|null>(null)
@@ -1446,6 +1448,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       try {
         const { data } = await db.from("deleted_orders").select("id")
         deletedIds = new Set((data || []).map((r: { id: number }) => Number(r.id)))
+      } catch {}
+      try {
+        const { data } = await db.from("analytics_excluded_orders").select("id")
+        setNoStoreBacklogIds(new Set((data || []).map((r: { id: number }) => Number(r.id))))
       } catch {}
       const [recoveredO, recoveredT] = await Promise.all([
         recoverFromBackup("orders",   "dtx_orders",   o, sanitizeOrder, deletedIds),
@@ -3523,7 +3529,7 @@ tr:hover td{background:#F3F2FD}
                     return {store:s, count:ords.length, meters, done, high, overdue, avgSize}
                   }).filter(s=>s.count>0).sort((a,b)=>b.meters-a.meters)
                   const maxM=Math.max(...storeData.map(s=>s.meters),1)
-                  const noStore=allOrders.filter(o=>!o.store).length
+                  const noStore=allOrders.filter(o=>!o.store && !noStoreBacklogIds.has(Number(o.id))).length
                   if(storeData.length===0) return (
                     <div style={{...S.card,gridColumn:"1 / -1"}}>
                       <div style={S.cHead} className="dtx-chead"><span style={S.cTitle}>🏪 Store analytics</span></div>
