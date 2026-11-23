@@ -1602,6 +1602,12 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     })
   }, [textiles, textileSearch, textileSort])
 
+  // Days past a deadline (0 or negative = not late yet)
+  const daysLateFrom = (d: string) => {
+    const t = new Date(); t.setHours(0,0,0,0)
+    return Math.round((t.getTime() - new Date(d).getTime()) / 86400000)
+  }
+
   // Warp groups: group by actual assigned machine + fabric + color.
   // Two orders with different machineCategories but same fabric/color
   // assigned to the same machine share one physical warp — one group.
@@ -1610,6 +1616,7 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
       label: string; machine: string; machineId: number|null
       meters: number; count: number; orderIds: number[]
       closed: boolean   // true = warp is sealed / on-machine
+      earliest: string | null   // earliest deadline among the group's orders
     }> = {}
     const activeOrders = orders.filter(o => o.warpStatus !== "done")
     for (const o of activeOrders) {
@@ -1620,11 +1627,12 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         label: `${o.fabricType} · ${o.color}`,
         machine: assignedM.name, machineId: assignedM.id,
         meters: 0, count: 0, orderIds: [],
-        closed: !!o.warpClosed,
+        closed: !!o.warpClosed, earliest: null,
       }
       g[key].meters += calcWarp(o.quantity)
       g[key].count++
       g[key].orderIds.push(o.id)
+      if (o.deadline && (!g[key].earliest || o.deadline < g[key].earliest)) g[key].earliest = o.deadline
     }
     for (const o of activeOrders) {
       const inSchedule = machines.some(m => (schedule[m.id] ?? []).some(x => x.id === o.id))
@@ -1632,11 +1640,12 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
         const key = `${warpKey(o)}||unassigned`
         if (!g[key]) g[key] = {
           label: `${o.fabricType} · ${o.color}`, machine: "Unassigned", machineId: null,
-          meters: 0, count: 0, orderIds: [], closed: false,
+          meters: 0, count: 0, orderIds: [], closed: false, earliest: null,
         }
         g[key].meters += calcWarp(o.quantity)
         g[key].count++
         g[key].orderIds.push(o.id)
+        if (o.deadline && (!g[key].earliest || o.deadline < g[key].earliest)) g[key].earliest = o.deadline
       }
     }
     return g
@@ -2802,9 +2811,15 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                       !q ||
                       label.toLowerCase().includes(q) ||
                       machine.toLowerCase().includes(q)
-                    )
+                    ).sort(([,a],[,b])=>{
+                      // most urgent first: earliest deadline; groups without a deadline last
+                      if (!a.earliest && !b.earliest) return 0
+                      if (!a.earliest) return 1
+                      if (!b.earliest) return -1
+                      return a.earliest < b.earliest ? -1 : a.earliest > b.earliest ? 1 : 0
+                    })
                     if (entries.length===0) return <div style={S.empty}>No warp groups match "{warpGroupSearch}"</div>
-                    return <>{entries.map(([key,{label,machine,meters,count,orderIds,closed}])=>(
+                    return <>{entries.map(([key,{label,machine,meters,count,orderIds,closed,earliest}])=>(
                     <div key={key} style={{padding:"10px 0",borderBottom:"0.5px solid #f5f5f5",
                       opacity: closed ? 0.85 : 1}}>
                       <div style={{display:"flex",alignItems:"center"}}>
@@ -2823,6 +2838,10 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
                             <span>·</span>
                             <span>{count} order{count>1?"s":""}</span>
                             {count>1&&!closed&&<span style={S.sameWarp}>same warp</span>}
+                            {earliest && <span>· Due {earliest}</span>}
+                            {earliest && daysLateFrom(earliest) > 0 && (
+                              <span style={{color:"#A32D2D",fontWeight:600}}>{daysLateFrom(earliest)}d late</span>
+                            )}
                           </div>
                         </div>
                         <div style={{fontSize:13,color:"#555",marginRight:10}}>{meters}m</div>
