@@ -43,7 +43,9 @@ export default async function handler(req: any, res: any) {
       }))
     : []
 
-  const model = process.env.GEMINI_MODEL || "gemini-3.8-flash"
+  // Comma-separated list in GEMINI_MODELS on Vercel overrides this default order.
+  const models = (process.env.GEMINI_MODELS || "gemini-3.8-flash,gemini-2.5-flash-lite,gemini-2.5-flash")
+    .split(",").map(m => m.trim()).filter(Boolean)
   const contents = [
     ...history.map(t => ({
       role: t.role === "assistant" ? "model" : "user",
@@ -55,26 +57,40 @@ export default async function handler(req: any, res: any) {
     },
   ]
 
-  try {
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM }] },
-        contents,
-        generationConfig: { temperature: 0.3, maxOutputTokens: 1500 },
-      }),
-    })
-    const data: any = await r.json()
-    if (!r.ok) {
-      res.status(502).json({ error: data?.error?.message ?? "The AI service returned an error" })
+  // Try each model in order. Move to the next one if it is missing, busy, or returns no real answer.
+  const failures: string[] = []
+  for (const model of models) {
+    try {
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: SYSTEM }] },
+          contents,
+          generationConfig: { temperature: 0.3, maxOutputTokens: 1500 },
+        }),
+      })
+      const data: any = await r.json().catch(() => ({}))
+      if (!r.ok) {
+        failures.push(`${model}: ${data?.error?.message ?? r.status}`)
+        continue
+      }
+      const answer: string = (data?.candidates?.[0]?.content?.parts ?? [])
+        .map((p: { text?: string }) => p.text ?? "")
+        .join("")
+        .trim()
+      if (!answer || /high demand|no longer available/i.test(answer)) {
+        failures.push(`${model}: busy or unavailable`)
+        continue
+      }
+      res.status(200).json({ answer, model })
       return
+    } catch {
+      failures.push(`${model}: could not be reached`)
     }
-    const answer: string = (data?.candidates?.[0]?.content?.parts ?? [])
-      .map((p: { text?: string }) => p.text ?? "")
-      .join("")
-    res.status(200).json({ answer: answer || "The assistant returned no answer. Try asking again." })
-  } catch {
-    res.status(502).json({ error: "Could not reach the AI service. Try again in a minute." })
   }
+  res.status(503).json({
+    error: "All AI models are busy or unavailable right now. Wait a few minutes and try again.",
+    details: failures,
+  })
 }
