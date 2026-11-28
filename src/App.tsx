@@ -7,6 +7,7 @@ import type { CSSProperties } from "react"
 import { createClient } from "@supabase/supabase-js"
 import type { Session } from "@supabase/supabase-js"
 import RollsView from "./Rolls"
+import AssistantView from "./Assistant"
 
 // ─── SUPABASE CLIENT ─────────────────────────────────────────
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string
@@ -246,7 +247,7 @@ type MachineCategory =
   | "Mechanical Double 280" | "Mechanical Double 140"
 type Priority   = "High" | "Normal" | "Low"
 type WarpStatus = "not-started" | "on-machine" | "done"
-type View = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history" | "suggestions" | "threads" | "textile-stock" | "import" | "rolls"
+type View = "dashboard" | "orders" | "machines" | "textiles" | "analytics" | "history" | "suggestions" | "threads" | "textile-stock" | "import" | "rolls" | "assistant"
 
 // warpOrder: per-machine ordered list of warpKeys — controls which warp group runs first
 // key = machineId, value = array of warpKeys in display order
@@ -2482,9 +2483,60 @@ function App({ onLogout }: { session: Session; onLogout: () => void }) {
     {id:"analytics",     icon:"↗", label:"Analytics"},
     {id:"history",       icon:"🕓", label:"History"},
     {id:"suggestions",   icon:"💡", label:"Suggestions"},
+    {id:"assistant",     icon:"🤖", label:"Assistant"},
     {id:"import",        icon:"📥", label:"Import"},
     {id:"rolls",         icon:"🏷", label:"Packing system"},
   ]
+
+  // ── ASSISTANT DATA SUMMARY ────────────────────────────────
+  // Plain-text snapshot of the live data, sent with each question to the AI assistant.
+  // Order numbers, production codes, stores and quantities only; no customer names exist in the app.
+  function buildAssistantSummary(): string {
+    const today = new Date(); today.setHours(0, 0, 0, 0)
+    const daysLate = (d: string) => Math.round((today.getTime() - new Date(d).getTime()) / 86400000)
+    const active = orders.filter(o => o.warpStatus !== "done")
+    const lateOrds = active
+      .filter(o => o.deadline && daysLate(o.deadline) > 0)
+      .sort((a, b) => a.deadline < b.deadline ? -1 : 1)
+    const lines: string[] = []
+
+    lines.push(`TODAY: ${today.toISOString().slice(0, 10)}`)
+    lines.push(`ACTIVE ORDERS: ${active.length} (${active.reduce((s, o) => s + o.quantity, 0)} m ordered)`)
+    lines.push(`LATE ORDERS: ${lateOrds.length}`)
+    lines.push(`FINISHED ORDERS: ${orders.length - active.length}`)
+
+    lines.push("", "MACHINES (name · capacity m · queued m · status):")
+    for (const m of machines) {
+      const load = machineLoad(schedule, m.id)
+      lines.push(`- ${m.name} · capacity ${m.capacity} · queued ${load}${m.outOfOrder ? " · OUT OF ORDER" : ""}`)
+    }
+
+    lines.push("", "WARP GROUPS, most urgent first (machine · fabric · colour · orders · meters · earliest deadline · days late · sealed):")
+    const groups = Object.values(warpGroups)
+      .sort((a, b) => {
+        if (!a.earliest) return 1
+        if (!b.earliest) return -1
+        return a.earliest < b.earliest ? -1 : a.earliest > b.earliest ? 1 : 0
+      })
+      .slice(0, 40)
+    for (const g of groups) {
+      const late = g.earliest ? daysLate(g.earliest) : null
+      lines.push(`- ${g.machine} · ${g.label} · ${g.count} orders · ${g.meters} m · due ${g.earliest ?? "none"} · ${late !== null && late > 0 ? late + " days late" : "on time"} · ${g.closed ? "sealed (running)" : "open"}`)
+    }
+
+    lines.push("", "LATE ORDERS, most overdue first (order no · textile code · fabric · colour · qty m · days late · store · status):")
+    for (const o of lateOrds.slice(0, 60)) {
+      lines.push(`- ${o.orderNumber ?? "no number"} · ${o.textileCode} · ${o.fabricType} · ${o.color} · ${o.quantity} m · ${daysLate(o.deadline)} days late · ${o.store ?? "no store"} · ${o.warpStatus}`)
+    }
+
+    lines.push("", "THREAD SHORTAGES (thread · in stock kg · needed kg · short kg):")
+    if (threadShort.length === 0) lines.push("- none")
+    for (const x of threadShort.slice(0, 30)) {
+      lines.push(`- ${x.t.name} ${x.t.color} · ${x.t.stockKg} · ${x.need} · ${x.short}`)
+    }
+
+    return lines.join("\n")
+  }
 
   // ── LOADING GATE ──────────────────────────────────────────
   // Show a proper loading screen instead of empty dashboard while
@@ -3896,6 +3948,8 @@ tr:hover td{background:#F3F2FD}
         })()}
 
         {/* ── SUGGESTIONS VIEW ──────────────────────────── */}
+        {view==="assistant" && <AssistantView getSummary={buildAssistantSummary}/>}
+
         {view==="suggestions" && (()=>{
 
           // ── ANALYSIS ENGINE ─────────────────────────────────
