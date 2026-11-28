@@ -43,7 +43,7 @@ export default async function handler(req: any, res: any) {
       }))
     : []
 
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash"
+  const model = process.env.GEMINI_MODEL || "gemini-3.8-flash"
   const contents = [
     ...history.map(t => ({
       role: t.role === "assistant" ? "model" : "user",
