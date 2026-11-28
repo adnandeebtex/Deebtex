@@ -81,7 +81,12 @@ export default function AssistantView({ getSummary }: { getSummary: () => string
       const data = await res.json().catch(() => ({}))
       setMsgs(p => [...p, {
         role: "assistant",
-        text: res.ok ? (data.answer ?? "No answer.") : `⚠️ ${data.error ?? "Something went wrong."}`,
+        text: res.ok
+          ? (data.answer ?? "No answer.")
+          : `⚠️ ${data.error ?? "Something went wrong."}` +
+            (Array.isArray(data.details) && data.details.length
+              ? "\n\nWhy each model failed:\n" + data.details.map((d: string) => `• ${d}`).join("\n")
+              : ""),
       }])
     } catch {
       setMsgs(p => [...p, { role: "assistant", text: "⚠️ Could not reach the assistant. Check your connection." }])
