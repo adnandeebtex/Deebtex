@@ -44,7 +44,7 @@ export default async function handler(req: any, res: any) {
     : []
 
   // Comma-separated list in GEMINI_MODELS on Vercel overrides this default order.
-  const models = (process.env.GEMINI_MODELS || "gemini-3.8-flash,gemini-2.5-flash-lite,gemini-2.5-flash")
+  const models = (process.env.GEMINI_MODELS || "gemini-3.8-flash,gemini-3.5-flash-lite")
     .split(",").map(m => m.trim()).filter(Boolean)
   const contents = [
     ...history.map(t => ({
