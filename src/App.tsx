@@ -3948,7 +3948,11 @@ tr:hover td{background:#F3F2FD}
         })()}
 
         {/* ── SUGGESTIONS VIEW ──────────────────────────── */}
-        {view==="assistant" && <AssistantView getSummary={buildAssistantSummary}/>}
+        {view==="assistant" && (
+          <div style={{flex:1, minHeight:0, display:"flex", flexDirection:"column", overflow:"hidden"}}>
+            <AssistantView getSummary={buildAssistantSummary}/>
+          </div>
+        )}
 
         {view==="suggestions" && (()=>{
 
